@@ -9,6 +9,7 @@ import glfw "vendor:glfw"
 // accesses live App/Machine state from a worker.
 Persistence_Change :: struct {
     desired, refresh, reconnect, cleanup, success, done: bool,
+    io_session: f64,
     worker: ^thread.Thread,
     error: [512]u8,
     error_len: int,
@@ -24,6 +25,7 @@ persistence_change_worker :: proc(change:^Persistence_Change) {
     } else {
         scratch:=new(App)
         change.success=persistence_service_set(scratch,change.desired,refresh_only=change.refresh,force_restart=change.reconnect)
+        change.io_session=scratch.persistence_io_session
         change.error=scratch.persistence_error;change.error_len=scratch.persistence_error_len
         free(scratch)
     }
@@ -84,6 +86,7 @@ persistence_change_poll :: proc(a:^App) {
     a.persistence_enabled=change.desired;a.persistence_error_len=0
     a.persistence_last_poll=-1e9
     if change.desired {
+        a.persistence_io_session=change.io_session
         local:=a.local_machine.state
         if !persistence_local_captured {
             persistence_local_nvml=local.metrics.nvml_available
@@ -92,6 +95,7 @@ persistence_change_poll :: proc(a:^App) {
             persistence_local_captured=true
         }
         for m in a.machines[:] {
+            m.state.io_summary=IO_Summary{started_at=change.io_session}
             if m!=a.local_machine&&!m.persistent {continue}
             if m.connection!=nil {
                 sync.atomic_store(&m.connection.stop,true)

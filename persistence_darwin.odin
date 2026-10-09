@@ -177,7 +177,7 @@ persistence_install_unit :: proc(a:^App)->(success,updated:bool) {
     if !persistence_atomic_write(plist_path,transmute([]u8)plist) {persistence_error_set(a,"Could not save the user persistence LaunchAgent.");return}
     return true,true
 }
-persistence_service_set :: proc(a:^App,enable:bool,refresh_only:bool=false,force_restart:bool=false)->bool {
+persistence_platform_service_set :: proc(a:^App,enable:bool,refresh_only:bool=false,force_restart:bool=false)->bool {
     if !enable {
         if !persistence_darwin_stop(a) {return false}
         path:=persistence_darwin_plist_path()

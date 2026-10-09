@@ -210,20 +210,20 @@ cpu_plot :: proc(a:^App,kind:CPU_Plot,core:int,x,y,w,h,ceiling:f32,color:Color,b
     }
 }
 
-cpu_grid :: proc(a:^App,x,y,w,h,ceiling:f32,kind:CPU_Plot) {
+cpu_grid :: proc(a:^App,x,y,w,h,ceiling:f32,kind:CPU_Plot,label_x:f32) {
     for i in 0..<3 {
         value:=ceiling*f32(2-i)/2
         yy:=y+h*f32(i)/2
         rect(a,x,yy,w,1,LINE)
         label:=fmt.tprintf("%.0f",value)
         if kind==.Frequency {label=fmt.tprintf("%.1f",value/1000)}
-        right_text(a,label,x-8,yy+4,12,MUTED)
+        text(a,label,label_x,yy+4,12,MUTED)
     }
 }
 
 cpu_dashboard :: proc(a:^App) {
     m:=&a.metrics
-    x,w:=a.content_x,a.width-a.content_x-16
+    x,w:=a.content_x,a.width-2*a.content_x
     if w<160 {return}
     compact:=w<700
     stats_rows:=2 if compact else 1
@@ -234,23 +234,22 @@ cpu_dashboard :: proc(a:^App) {
     rows:=(m.physical_core_count+cols-1)/cols
     siblings:=2
     for core in m.physical_cores[:m.physical_core_count] {siblings=max(siblings,core.logical_count)}
-    viewport_top,viewport_bottom:=f32(72),a.height-28
+    viewport_top,viewport_bottom:=f32(72),a.height-a.content_x
     plot_gap:=f32(50)
-    plot_header_h,time_axis_h,core_heading_gap:=f32(36),f32(22),f32(34)
+    plot_header_h,time_axis_h,core_gap:=f32(36),f32(22),f32(34)
     busy_h,small_h:=f32(82),f32(38)
     controls_h:=graph_controls_height(w-36)+8
     cell_h:=f32(158+(siblings-2)*21)
     graph_h:=plot_header_h+busy_h+small_h*2+plot_gap*2+time_axis_h+controls_h
     // Share spare height between the histories and core rows; keep scrolling
     // for smaller windows and machines with more cores instead of squeezing.
-    spare:=max(0,viewport_bottom-(graph_y+graph_h+core_heading_gap+22+f32(rows)*cell_h))
+    spare:=max(0,viewport_bottom-(graph_y+graph_h+core_gap+max(0,f32(rows)*cell_h-24)))
     busy_h+=spare*0.25
     small_h+=spare*0.125
     if rows>0 {cell_h+=spare*0.5/f32(rows)}
     graph_h=plot_header_h+busy_h+small_h*2+plot_gap*2+time_axis_h+controls_h
-    core_heading_y:=graph_y+graph_h+core_heading_gap
-    core_y:=core_heading_y+22
-    content_bottom:=core_y+f32(rows)*cell_h
+    core_y:=graph_y+graph_h+core_gap
+    content_bottom:=core_y+max(0,f32(rows)*cell_h-24)
     max_scroll:=max(0,content_bottom-viewport_bottom)
     a.cpu_scroll=clamp(a.cpu_scroll,0,max_scroll)
     offset:=a.cpu_scroll
@@ -320,8 +319,7 @@ cpu_dashboard :: proc(a:^App) {
     }
     // Aligned histories sit directly on the background, each with its own scale.
     fit_text(a,"BUSY TIME %",x,gy-18,w,12,MUTED)
-    if w>450 {right_text(a,"Physical cores",x+w,gy-18,12,MUTED)}
-    cpu_grid(a,gx,gy,gw,busy_h,100,.Busy)
+    cpu_grid(a,gx,gy,gw,busy_h,100,.Busy,label_x=x)
     cpu_plot(a,.Busy,-1,gx,gy,gw,busy_h,100,PURPLE,band=true)
     power_max,freq_max:=f32(50),f32(6000)
     for _,i in 0..<a.history_count {
@@ -346,14 +344,14 @@ cpu_dashboard :: proc(a:^App) {
             fit_text(a,command,gx+8,power_y+small_h/2,gw-16,12,SOFT)
         }
     }
-    cpu_grid(a,gx,power_y,gw,small_h,power_max,.Power)
+    cpu_grid(a,gx,power_y,gw,small_h,power_max,.Power,label_x=x)
     cpu_plot(a,.Power,-1,gx,power_y,gw,small_h,power_max,AMBER)
     freq_y:=power_y+small_h+plot_gap
     text(a,"ACTIVE FREQUENCY GHz",x,freq_y-18,12,MUTED)
     if !m.cpu_frequency_available {right_text(a,"Unavailable",x+w,freq_y-18,12,MUTED)}
-    cpu_grid(a,gx,freq_y,gw,small_h,freq_max,.Frequency)
+    cpu_grid(a,gx,freq_y,gw,small_h,freq_max,.Frequency,label_x=x)
     cpu_plot(a,.Frequency,-1,gx,freq_y,gw,small_h,freq_max,CYAN)
-    text(a,graph_time_axis_label(a),gx,freq_y+small_h+time_axis_h,12,MUTED)
+    text(a,graph_time_axis_label(a),x,freq_y+small_h+time_axis_h,12,MUTED)
     right_text(a,history_end_label(a),gx+gw,freq_y+small_h+time_axis_h,12,MUTED)
     graph_controls_draw(a,gx,freq_y+small_h+time_axis_h+8,gw)
     if a.history_count>0 {
@@ -367,8 +365,6 @@ cpu_dashboard :: proc(a:^App) {
             history_time_label(a,slot,a.cpu_pinned_slot>=0,cursor_x,gx,graph_ys[label_graph],gw,graph_hs[label_graph])
         }
     }
-    fit_text(a,"PHYSICAL CORES / SIBLING THREADS",x,core_heading_y-offset,w,12,SOFT)
-    if !m.cpu_topology_available {fit_text(a,"LOGICAL CPU FALLBACK",x,core_heading_y-offset,w,12,SOFT)}
     for col in 1..<cols {
         divider_x:=x+f32(col)*(cell_w+gap)-gap/2
         rect(a,divider_x,core_y-offset,1,f32(rows)*cell_h-24,LINE)

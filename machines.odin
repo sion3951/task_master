@@ -405,7 +405,7 @@ machine_connection_draw :: proc(a:^App)->bool {
     if m.port!=0 {host=fmt.tprintf("[%s]:%d",host,m.port) if strings.contains(host,":") else fmt.tprintf("%s:%d",host,m.port)}
     status:="Saved" if m.status==.Saved else "Connecting" if m.status==.Connecting else "Disconnected" if m.status==.Disconnected else "Stale telemetry" if m.has_sample else "Connected"
     color:=machine_color(a,m)
-    x,w:=a.content_x,a.width-a.content_x-28
+    x,w:=a.content_x,a.width-2*a.content_x
     if m.has_sample {
         if m.status==.Connecting {status="Reconnecting"}
         detail:=fmt.tprintf("%s / %s / last sample %.0fs ago",host,status,time.duration_seconds(time.tick_since(m.received)))
@@ -421,7 +421,7 @@ machine_connection_draw :: proc(a:^App)->bool {
     return true
 }
 machine_inline :: proc(a:^App,index:int)->bool {
-    for t in a.machine_tabs {if t.index==index&&t.y==23 {return true}}
+    for t in a.machine_tabs {if t.index==index&&t.y==a.content_x {return true}}
     return false
 }
 machine_tab_at :: proc(a:^App,x,y:f32)->int {
@@ -466,6 +466,7 @@ machine_pointer_release :: proc(a:^App,x,y:f32) {
     a.machine_dragging=false;a.machine_drag_index=-1;a.machine_drag_target=-1;a.dirty=true
 }
 machine_header :: proc(a:^App,x,w:f32) {
+    y:=a.content_x
     clear(&a.machine_tabs)
     widths:=make([]f32,a.machine_count,context.temp_allocator)
     for m,i in a.machines[:] {
@@ -490,32 +491,32 @@ machine_header :: proc(a:^App,x,w:f32) {
         if used+item_w+8+reserve>budget&&i!=a.active_machine {continue}
         if i==a.active_machine {active_room=0}
         xx:=x+used
-        append(&a.machine_tabs,Machine_Tab{i,xx,23,item_w,31})
-        if i==a.active_machine {rect(a,xx,53,item_w-4,1,SOFT)}
-        if a.machine_dragging&&a.machine_drag_target==i {rect(a,xx-3,26,2,23,CYAN)}
-        rect(a,xx+3,36,5,5,machine_color(a,m))
+        append(&a.machine_tabs,Machine_Tab{i,xx,y,item_w,28})
+        if i==a.active_machine {rect(a,xx,y+27,item_w-4,1,SOFT)}
+        if a.machine_dragging&&a.machine_drag_target==i {rect(a,xx-3,y+3,2,23,CYAN)}
+        rect(a,xx+3,y+10,5,5,machine_color(a,m))
         label:=string(m.name[:m.name_len])
         if m.state!=nil&&m.state.paused {label=fmt.tprintf("%s (paused)",label)}
         else if m.has_sample&&machine_stale(a,m) {label=fmt.tprintf("%s (stale)",label)}
-        fit_text(a,label,xx+14,43,item_w-20,13,TEXT if i==a.active_machine else MUTED)
+        fit_text(a,label,xx+14,y+17,item_w-20,13,TEXT if i==a.active_machine else MUTED)
         used+=item_w+8
     }
     // Keep a details dropdown even when all hosts fit; hidden hosts share it.
     a.machine_overflow_x=x+used
-    append(&a.machine_tabs,Machine_Tab{-1,x+used,23,24,31})
-    text(a,"v",x+used+6,41,12,MUTED)
+    append(&a.machine_tabs,Machine_Tab{-1,x+used,y,24,28})
+    text(a,"v",x+used+6,y+15,12,MUTED)
     a.machine_menu_x=min(x+used,max(16,a.width-308));a.machine_menu_w=280
-    if hit(a,x+used+27,23,26,31)&&!a.machine_dialog {machine_dialog_open(a);a.click=false}
-    text(a,"+",x+used+33,44,19,SOFT)
+    if hit(a,x+used+27,y,26,28)&&!a.machine_dialog {machine_dialog_open(a);a.click=false}
+    text(a,"+",x+used+33,y+18,19,SOFT)
     refresh_x:=x+used+54
     busy:=a.machine_login_discovery!=nil
     hovering:=machine_refresh_hover(a,a.mouse_x,a.mouse_y)
-    if hit(a,refresh_x,23,26,31)&&!a.machine_dialog {
+    if hit(a,refresh_x,y,26,28)&&!a.machine_dialog {
         if !busy {machines_discover(a)}
         a.click=false;a.dirty=true
     }
     color:=AMBER if busy else TEXT if hovering else SOFT
-    cx,cy,r:=refresh_x+13,f32(38),f32(6)
+    cx,cy,r:=refresh_x+13,y+12,f32(6)
     start,finish:=f32(-0.45)*math.PI,f32(1.15)*math.PI
     for i in 0..<14 {
         theta0:=start+(finish-start)*f32(i)/14
@@ -528,7 +529,7 @@ machine_header :: proc(a:^App,x,w:f32) {
     stroke(a,ex,ey,ex-3*tx+2*ty,ey-3*ty-2*tx,1.25,color)
 }
 machine_refresh_hover :: proc(a:^App,x,y:f32)->bool {
-    return !a.machine_dialog&&x>=a.machine_overflow_x+54&&x<a.machine_overflow_x+80&&y>=23&&y<54
+    return !a.machine_dialog&&x>=a.machine_overflow_x+54&&x<a.machine_overflow_x+80&&y>=a.content_x&&y<a.content_x+28
 }
 machine_dialog_open :: proc(a:^App) {
     a.machine_menu=false
@@ -597,19 +598,19 @@ machine_overlay_handle :: proc(a:^App) {
     }
     // Handle these before the open menu consumes an outside click; header
     // rendering then sees click=false and cannot launch a second refresh.
-    if hit(a,a.machine_overflow_x+54,23,26,31) {
+    if hit(a,a.machine_overflow_x+54,a.content_x,26,28) {
         if a.machine_login_discovery==nil {machines_discover(a)}
         a.machine_menu=false;a.click=false;a.dirty=true
         return
     }
-    if a.machine_menu&&hit(a,a.machine_overflow_x+27,23,26,31) {machine_dialog_open(a);a.click=false;return}
+    if a.machine_menu&&hit(a,a.machine_overflow_x+27,a.content_x,26,28) {machine_dialog_open(a);a.click=false;return}
     if !a.machine_menu {return}
     if a.click {
-        bottom:=f32(74)
-        for t in a.machine_tabs {if t.y>54 {bottom=max(bottom,t.y+t.h+8)}}
+        bottom:=a.content_x+48
+        for t in a.machine_tabs {if t.y>a.content_x+28 {bottom=max(bottom,t.y+t.h+8)}}
         if hit(a,a.machine_menu_x+a.machine_menu_w-65,bottom+8,53,23) {machine_remove(a,a.active_machine);a.click=false;return}
         for t in a.machine_tabs {
-            if t.y<=54 {continue}
+            if t.y<=a.content_x+28 {continue}
             if hit(a,t.x+t.w,t.y,32,t.h) {machine_remove(a,t.index);a.click=false;return}
         }
         a.machine_menu=false;a.click=false
@@ -617,7 +618,7 @@ machine_overlay_handle :: proc(a:^App) {
 }
 machine_overlay_draw :: proc(a:^App) {
     if a.machine_menu {
-        x,y,w:=a.machine_menu_x,f32(58),a.machine_menu_w
+        x,y,w:=a.machine_menu_x,a.content_x+32,a.machine_menu_w
         m:=a.machines[a.active_machine]
         hidden:=make([dynamic]int,0,a.machine_count,context.temp_allocator)
         for _,i in a.machines[:] {if !machine_inline(a,i) {append(&hidden,i)}}
@@ -661,8 +662,8 @@ machine_overlay_draw :: proc(a:^App) {
             label:="Checking machines" if a.machine_login_discovery!=nil else "Refresh machines"
             w:=renderer_text_width(&a.renderer,label,12*a.scale)/a.scale+20
             x:=clamp(a.machine_overflow_x+54,f32(8),max(8,a.width-w-8))
-            panel(a,x,58,w,29)
-            text(a,label,x+10,78,12,SOFT)
+            panel(a,x,a.content_x+32,w,29)
+            text(a,label,x+10,a.content_x+52,12,SOFT)
         }
         return
     }

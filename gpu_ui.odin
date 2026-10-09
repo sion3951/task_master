@@ -106,13 +106,13 @@ gpu_plot :: proc(a:^App,kind:GPU_Plot,x,y,w,h,ceiling:f32,render_pass:Graph_Pass
 
 gpu_dashboard :: proc(a:^App) {
     m:=&a.metrics
-    x,w:=a.content_x,a.width-a.content_x-16
+    x,w:=a.content_x,a.width-2*a.content_x
     if w<160 {return}
     compact:=w<700
     stats_cols:=2 if compact else 5
     stats_h:=f32(198) if compact else f32(66)
     graph_y:=f32(72)+65+stats_h
-    viewport_top,viewport_bottom:=f32(72),a.height-28
+    viewport_top,viewport_bottom:=f32(72),a.height-a.content_x
     plot_gap,header_h,time_axis_h:=f32(50),f32(36),f32(22)
     busy_h,small_h:=f32(82),f32(38)
     process_h:=f32(230)
@@ -224,8 +224,8 @@ gpu_dashboard :: proc(a:^App) {
         fit_text(a,headings[i],x,yy-18,w,12,MUTED)
         _,available:=gpu_plot_value(&current,kind)
         if !available {right_text(a,"Unavailable",x+w,yy-18,12,MUTED)}
-        if kind==.Memory {memory_gb_grid(a,gx,yy,gw,hh,ceiling)}
-        else {cpu_grid(a,gx,yy,gw,hh,ceiling,.Busy)}
+        if kind==.Memory {memory_gb_grid(a,gx,yy,gw,hh,ceiling,label_x=x)}
+        else {cpu_grid(a,gx,yy,gw,hh,ceiling,.Busy,label_x=x)}
         gpu_plot(a,kind,gx,yy,gw,hh,ceiling)
         yy+=hh+plot_gap
     }
@@ -239,9 +239,9 @@ gpu_dashboard :: proc(a:^App) {
         fit_text(a,paired_headings[column],column_x,power_y-18,column_w,12,MUTED)
         _,available:=gpu_plot_value(&current,kind)
         if !available {right_text(a,"Unavailable",column_x+column_w,power_y-18,12,MUTED)}
-        cpu_grid(a,plot_x,power_y,power_w,small_h,paired_ceilings[column],.Power)
+        cpu_grid(a,plot_x,power_y,power_w,small_h,paired_ceilings[column],.Power,label_x=column_x)
         gpu_plot(a,kind,plot_x,power_y,power_w,small_h,paired_ceilings[column])
-        text(a,graph_time_axis_label(a),plot_x,graph_bottom+time_axis_h,12,MUTED)
+        text(a,graph_time_axis_label(a),column_x,graph_bottom+time_axis_h,12,MUTED)
         right_text(a,history_end_label(a),plot_x+power_w,graph_bottom+time_axis_h,12,MUTED)
     }
     if slot>=0&&(hover_slot>=0||a.gpu_pinned_slot>=0) {

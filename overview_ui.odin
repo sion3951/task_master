@@ -65,9 +65,9 @@ overview_summary :: proc(a:^App,kind:int,label,detail:string,value:f32,available
     fit_text(a,fmt.tprintf("%.1f%%",value) if available else "--",x,y+61,w,27,tint)
     fit_text(a,detail,x,y+86,w,12,MUTED)
     gx,gy,gw,gh:=x+36,y+122,w-36,h-148
-    cpu_grid(a,gx,gy,gw,gh,100,.Busy)
+    cpu_grid(a,gx,gy,gw,gh,100,.Busy,label_x=x)
     if available {overview_plot(a,kind,gx,gy,gw,gh)}
-    text(a,graph_time_axis_label(a),gx,gy+gh+22,12,MUTED)
+    text(a,graph_time_axis_label(a),x,gy+gh+22,12,MUTED)
     right_text(a,history_end_label(a),gx+gw,gy+gh+22,12,MUTED)
 }
 
@@ -108,7 +108,7 @@ overview_io :: proc(a:^App,x,y,w:f32) {
 }
 
 overview :: proc(a:^App) {
-    x,w:=a.content_x,a.width-a.content_x-16
+    x,w:=a.content_x,a.width-2*a.content_x
     if w<160 {return}
     compact:=w<700
     cols:=1 if compact else 3
@@ -116,7 +116,7 @@ overview :: proc(a:^App) {
     summary_h:=f32(228)
     details_h:=f32(342) if compact else f32(164)
     controls_h:=graph_controls_height(w-36)+8
-    viewport_top,viewport_bottom:=f32(72),a.height-28
+    viewport_top,viewport_bottom:=f32(72),a.height-a.content_x
     // Share spare height with the histories and process list; stack and scroll
     // on small windows so every section stays reachable.
     minimum_h:=f32(3/cols)*summary_h+controls_h+28+details_h+20+180
@@ -140,7 +140,7 @@ overview :: proc(a:^App) {
     for label,i in labels {
         cx,cy:=x+f32(i%cols)*(cw+gap),viewport_top+f32(i/cols)*summary_h-offset
         overview_summary(a,i,label,details[i],values[i],available[i],cx,cy,cw,summary_h)
-        if !compact&&i>0 {rect(a,cx-gap/2,viewport_top-offset,1,summary_h-8,LINE)}
+        if !compact&&i>0 {rect(a,cx-gap/2,viewport_top-offset,1,summary_h-4,LINE)}
     }
     graph_controls_draw(a,x+36,viewport_top+f32(3/cols)*summary_h+8-offset,w-36)
     details_y:=viewport_top+f32(3/cols)*summary_h+controls_h+28-offset

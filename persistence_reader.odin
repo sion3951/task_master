@@ -23,6 +23,7 @@ Persistence_Read_Result :: struct {
     history: [4][dynamic]f32,
     cpu_history: [dynamic]CPU_Sample,
     history_count: int,
+    io_summary: IO_Summary,
     written_at, sampled_at: f64,
     status: Connection_Status,
     message: [512]u8,
@@ -254,6 +255,7 @@ persistence_reader_worker :: proc(reader:^Persistence_Reader) {
                         if ok&&(cache.snapshot==""||remote_decode(transmute([]u8)cache.snapshot,result.metrics)) {
                             result.valid=true;result.has_sample=cache.snapshot!=""
                             result.written_at=cache.written_at;result.sampled_at=cache.sampled_at
+                            result.io_summary=cache.io_summary
                             result.status=cache.status;result.message_len=copy(result.message[:],cache.message)
                             if !job.request.paused {
                                 result.payload_ready=true
@@ -432,6 +434,7 @@ persistence_reader_poll_mode :: proc(a:^App,now:f64,live:bool) {
                         m.has_sample=true
                     }
                     persistence_reader_history_apply(reader,m.state,result)
+                    io_summary_apply(m.state,result.io_summary)
                     persistence_reader_stamp_set(m,live,result.written_at)
                     a.dirty=true
                 }

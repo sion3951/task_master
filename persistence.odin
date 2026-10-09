@@ -46,6 +46,7 @@ Persistence_Cache :: struct {
     // complete remote_encode frame without introducing a second wire schema.
     snapshot: string,
     samples: []Persistence_Sample,
+    io_summary: IO_Summary,
 }
 Persistence_Publication :: struct {
     sampled_at: f64,
@@ -72,6 +73,44 @@ persistence_directory :: proc()->string {
     base,err:=os.user_cache_dir(context.temp_allocator)
     if err!=nil {return ""}
     return fmt.tprintf("%s/task_master/persistence",base)
+}
+persistence_io_session_path :: proc()->string {
+    directory:=persistence_directory()
+    if directory=="" {return ""}
+    return fmt.tprintf("%s/io-session",directory)
+}
+persistence_io_session_read :: proc()->f64 {
+    path:=persistence_io_session_path()
+    if path=="" {return 0}
+    file,err:=persistence_platform_cache_open(path)
+    if err!=nil {return 0}
+    defer os.close(file)
+    buffer: [64]u8
+    count,read_error:=os.read(file,buffer[:])
+    session:f64
+    if read_error!=nil||count<=0||count==len(buffer)||json.unmarshal(buffer[:count],&session,allocator=context.temp_allocator)!=nil||!remote_nonnegative(session) {return 0}
+    return session
+}
+persistence_io_session_write :: proc(session:f64)->bool {
+    return persistence_atomic_write(persistence_io_session_path(),transmute([]u8)fmt.tprintf("%.9f",session))
+}
+
+// Explicit enabling begins a new accounting session. Runtime refreshes and
+// automatic service restarts retain the marker and the accumulated summary.
+persistence_service_set :: proc(a:^App,enable:bool,refresh_only:bool=false,force_restart:bool=false)->bool {
+    reset:=enable&&!refresh_only
+    previous,session:=f64(0),f64(0)
+    if reset {
+        previous=persistence_io_session_read()
+        session=persistence_wall_time()
+        if !persistence_io_session_write(session) {persistence_error_set(a,"Could not reset persistence I/O totals.");return false}
+    }
+    if !persistence_platform_service_set(a,enable,refresh_only,force_restart) {
+        if reset {_=persistence_io_session_write(previous)}
+        return false
+    }
+    if reset {a.persistence_io_session=session}
+    return true
 }
 persistence_cache_path :: proc(m:^Machine,live:bool=false)->string {
     directory:=persistence_directory()
@@ -151,7 +190,7 @@ persistence_cache_read :: proc(m:^Machine,live:bool=false)->(cache:Persistence_C
         cache.collector!=string(m.collector[:m.collector_len])||len(cache.samples)>HISTORY_CAPACITY||
         live&&len(cache.samples)>PERSISTENCE_LIVE_SAMPLES||
         len(cache.snapshot)>REMOTE_MAX_FRAME_BYTES||len(cache.message)>len(m.message)||
-        !remote_nonnegative(cache.written_at)||!remote_nonnegative(cache.sampled_at)||
+        !remote_nonnegative(cache.written_at)||!remote_nonnegative(cache.sampled_at)||!io_summary_valid(cache.io_summary)||
         int(cache.status)<0||int(cache.status)>int(Connection_Status.Saved) {return}
     previous:f64=0
     for s in cache.samples {
@@ -179,6 +218,7 @@ persistence_cache_read :: proc(m:^Machine,live:bool=false)->(cache:Persistence_C
 persistence_cache_apply :: proc(a:^App,m:^Machine,cache:Persistence_Cache,restore_snapshot:bool=true)->bool {
     if restore_snapshot&&cache.snapshot!=""&&!remote_decode(transmute([]u8)cache.snapshot,&m.state.metrics) {return false}
     state:=m.state
+    io_summary_apply(state,cache.io_summary)
     if restore_snapshot&&cache.snapshot!="" {state.process_revision+=1}
     pinned:f64=-1
     gpu_pinned:f64=-1
@@ -304,7 +344,7 @@ persistence_cache_write :: proc(a:^App,m:^Machine,live:bool=false)->bool {
     first_recent:=persistence_recent_start(samples,cutoff)
     cache:=Persistence_Cache{version=PERSISTENCE_CACHE_VERSION,host=string(m.host[:m.host_len]),
         collector=string(m.collector[:m.collector_len]),port=m.port,written_at=persistence_wall_time(),
-        sampled_at=sampled_at,status=m.status,message=string(m.message[:m.message_len]),snapshot=snapshot,samples=samples[first_recent:]}
+        sampled_at=sampled_at,status=m.status,message=string(m.message[:m.message_len]),snapshot=snapshot,samples=samples[first_recent:],io_summary=state.io_summary}
     return persistence_cache_atomic_write(persistence_cache_path(m,live),cache,live)
 }
 
@@ -381,6 +421,11 @@ persistence_service_main :: proc() {
     defer persistence_platform_service_destroy()
     a:=new(App)
     defer free(a)
+    a.persistence_io_session=persistence_io_session_read()
+    if a.persistence_io_session<=0 {
+        a.persistence_io_session=persistence_wall_time()
+        if !persistence_io_session_write(a.persistence_io_session) {fmt.eprintln("Could not initialize persistence I/O totals.");return}
+    }
     machines_init(a)
     defer machines_destroy(a)
     defer delete(a.persistence_config_data)
@@ -399,6 +444,7 @@ persistence_service_main :: proc() {
             cache.samples=cache.samples[first_recent:]
             _=persistence_cache_apply(a,m,cache,restore_snapshot=m!=a.local_machine)
         }
+        if m.state.io_summary.started_at!=a.persistence_io_session {m.state.io_summary=IO_Summary{started_at=a.persistence_io_session}}
         mem.free_all(context.temp_allocator)
     }
     local:=a.local_machine
@@ -423,6 +469,12 @@ persistence_service_main :: proc() {
         now:=time.duration_seconds(time.tick_since(started))
         graph_settings_poll(a)
         if now-last_config>=1 {
+            session:=persistence_io_session_read()
+            if session>a.persistence_io_session {
+                a.persistence_io_session=session
+                for m in a.machines {m.state.io_summary=IO_Summary{started_at=session}}
+                clear(&publications);clear(&live_publications)
+            }
             if persistence_config_reconcile(a) {
                 clear(&publications);clear(&live_publications)
                 persistence_publisher_reconcile(publisher,a);persistence_publisher_reconcile(live_publisher,a);persistence_cache_prune(a,true)

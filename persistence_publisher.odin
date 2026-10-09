@@ -80,6 +80,7 @@ persistence_publisher_submit :: proc(publisher:^Persistence_Publisher,m:^Machine
         state.history_count=m.state.history_count;state.history_next=m.state.history_next
     }
     metrics_display_copy(&state.metrics,&m.state.metrics)
+    state.io_summary=m.state.io_summary
     sync.atomic_store(&job.cancelled,false)
     job.retry_after={}
     job.shutdown_attempts=0

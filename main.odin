@@ -60,6 +60,7 @@ CPU_Sample :: struct {
 }
 Machine_State :: struct {
     metrics: Metrics,
+    io_summary: IO_Summary,
     paused: bool,
     process_order: [4]Process_Order,
     process_revision: u64,
@@ -172,6 +173,7 @@ App :: struct {
     machine_error: [512]u8,
     machine_error_len: int,
     persistence_enabled: bool,
+    persistence_io_session: f64,
     persistence_error: [512]u8,
     persistence_error_len: int,
     persistence_last_poll: f64,
@@ -377,7 +379,7 @@ history_time_label :: proc(a:^App,slot:int,pinned:bool,cursor_x,x,y,w,h:f32) {
     label_h:=f32(24)
     left,right:=x,x+w
     // A narrow split plot can borrow the content width to keep the time legible.
-    if label_w>w {left,right=a.content_x,a.width-16}
+    if label_w>w {left,right=a.content_x,a.width-a.content_x}
     label_x:=cursor_x+10
     if label_x+label_w>right {label_x=cursor_x-label_w-10}
     label_x=clamp(label_x,left,max(left,right-label_w))
@@ -502,6 +504,7 @@ history_push :: proc(a:^App,timestamp:f64=0) {
         sample.cores[i]=CPU_Core_Sample{lower=core.busy_lower,upper=core.busy_upper,
             frequency_mhz=core.frequency_mhz,frequency_available=core.frequency_available}
     }
+    if persistence_headless {io_summary_sample(&a.io_summary,sample,a.persistence_io_session)}
     a.history[0][a.history_next]=m.cpu_percent
     a.history[1][a.history_next]=m.gpus[0].utilization
     a.history[2][a.history_next]=memory_pct(m.memory_used,m.memory_total)
@@ -522,9 +525,10 @@ history_push :: proc(a:^App,timestamp:f64=0) {
 }
 
 navigation :: proc(a:^App)->f32 {
+    y:=a.content_x
     compact:=a.width<600
-    names:=[4]string{"Overview 1","CPU 2","GPU 3","Mem+Disk 4"}
-    if compact {names={"All 1","CPU 2","GPU 3","Mem+Disk 4"}}
+    names:=[4]string{"Overview 1","CPU 2","GPU 3","Mem+IO 4"}
+    if compact {names={"All 1","CPU 2","GPU 3","Mem+IO 4"}}
     gap:=f32(12) if compact else f32(18)
     widths: [4]f32
     total:=gap*3
@@ -532,28 +536,29 @@ navigation :: proc(a:^App)->f32 {
         widths[i]=renderer_text_width(&a.renderer,name,12*a.scale)/a.scale
         total+=widths[i]
     }
-    start:=a.width-28-total
+    start:=a.width-a.content_x-total
     x:=start
     for _,i in names {
-        if hit(a,x-6,24,widths[i]+12,30){a.view=View(i)}
+        if hit(a,x-6,y,widths[i]+12,28){a.view=View(i)}
         x+=widths[i]+gap
     }
     x=start
     for name,i in names {
-        text(a,name,x,42,12,TEXT if int(a.view)==i else MUTED)
+        text(a,name,x,y+16,12,TEXT if int(a.view)==i else MUTED)
         x+=widths[i]+gap
     }
     return persistence_control(a,start)
 }
 
 persistence_control :: proc(a:^App,nav_x:f32)->f32 {
+    y:=a.content_x
     label:="Persist" if a.width<600 else "Persistence"
     label_w:=renderer_text_width(&a.renderer,label,12*a.scale)/a.scale
     w:=label_w+44
     x:=nav_x-w-20
     a.persistence_x=x;a.persistence_w=w
-    hovered:=!a.machine_dialog&&!a.machine_menu&&a.mouse_x>=x-5&&a.mouse_x<x+w+5&&a.mouse_y>=24&&a.mouse_y<54
-    if hovered&&hit(a,x-5,24,w+10,30) {
+    hovered:=!a.machine_dialog&&!a.machine_menu&&a.mouse_x>=x-5&&a.mouse_x<x+w+5&&a.mouse_y>=y&&a.mouse_y<y+28
+    if hovered&&hit(a,x-5,y,w+10,28) {
         _=persistence_toggle(a)
         a.click=false;a.dirty=true
     }
@@ -562,20 +567,21 @@ persistence_control :: proc(a:^App,nav_x:f32)->f32 {
     color:=GREEN if enabled else MUTED
     if a.persistence_change!=nil {color=AMBER}
     if a.persistence_error_len>0 {color=AMBER}
-    rounded_rect(a,x,30,32,18,9,color if enabled||a.persistence_change!=nil else LINE)
+    rounded_rect(a,x,y+3,32,18,9,color if enabled||a.persistence_change!=nil else LINE)
     knob_x:=x+17 if enabled else x+3
-    rounded_rect(a,knob_x,33,12,12,6,BG if enabled||a.persistence_change!=nil else SOFT)
-    text(a,label,x+40,42,12,TEXT if hovered else color)
+    rounded_rect(a,knob_x,y+6,12,12,6,BG if enabled||a.persistence_change!=nil else SOFT)
+    text(a,label,x+40,y+16,12,TEXT if hovered else color)
     return x
 }
 
 persistence_message :: proc(a:^App) {
     if a.persistence_error_len==0 {return}
     // Keep service diagnostics in a hover tooltip instead of covering graphs.
-    if a.machine_dialog||a.machine_menu||a.mouse_x<a.persistence_x-5||a.mouse_x>=a.persistence_x+a.persistence_w+5||a.mouse_y<24||a.mouse_y>=54 {return}
+    y:=a.content_x
+    if a.machine_dialog||a.machine_menu||a.mouse_x<a.persistence_x-5||a.mouse_x>=a.persistence_x+a.persistence_w+5||a.mouse_y<y||a.mouse_y>=y+28 {return}
     w:=min(a.width-56,f32(720))
-    panel(a,a.width-w-28,60,w,34)
-    fit_text(a,string(a.persistence_error[:a.persistence_error_len]),a.width-w-16,82,w-24,12,AMBER)
+    panel(a,a.width-w-a.content_x,y+36,w,34)
+    fit_text(a,string(a.persistence_error[:a.persistence_error_len]),a.width-w-a.content_x+12,y+58,w-24,12,AMBER)
 }
 
 header :: proc(a:^App) {
@@ -584,16 +590,21 @@ header :: proc(a:^App) {
     // Reserve clock space before laying out the machine tabs and controls.
     clock_w:=renderer_text_width(&a.renderer,"00:00:00",12*a.scale)/a.scale
     clock_x:=nav_x-clock_w-20
-    text(a,platform_clock_text(a.clock_second),clock_x,42,12,SOFT)
+    text(a,platform_clock_text(a.clock_second),clock_x,a.content_x+16,12,SOFT)
     nav_x=clock_x
-    titles:=[4]string{"Overview","Processor","Graphics","Memory + Disk"}
+    titles:=[4]string{"Overview","Processor","Graphics","Memory + IO"}
     selector_x:=a.content_x
     if nav_x-a.content_x>490 {
         title_width:=f32(0)
         for title in titles {
             title_width=max(title_width,renderer_text_width(&a.renderer,title,24*a.scale)/a.scale)
         }
-        text(a,titles[int(a.view)],a.content_x,46,24)
+        title:=titles[int(a.view)]
+        font:=renderer_font_size(&a.renderer,24*a.scale)
+        top:=f32(0)
+        for ch in title {top=max(top,f32(font.glyphs[ch-32].top))}
+        // Match the visible title's top to the side margin at every DPI.
+        text(a,title,a.content_x,a.content_x+top/a.scale,24)
         selector_x+=title_width+26
     }
     machine_header(a,selector_x,max(90,nav_x-selector_x-14))
@@ -764,7 +775,7 @@ scroll_callback :: proc "c" (window:glfw.WindowHandle,xoffset,yoffset:f64) {
     }
     x,y:=glfw.GetCursorPos(window)
     x,y=window_ui_position(a,x,y)
-    if a.view==.GPU&&f32(x)>=a.content_x&&f32(x)<a.width-16&&f32(y)>=72&&f32(y)<a.height-28 {
+    if a.view==.GPU&&f32(x)>=a.content_x&&f32(x)<a.width-a.content_x&&f32(y)>=72&&f32(y)<a.height-a.content_x {
         in_table:=f32(x)>=a.table_x&&f32(x)<a.table_x+a.table_w&&f32(y)>=a.table_y&&f32(y)<a.table_y+a.table_h
         if in_table {a.process_scroll[int(a.view)]-=f32(yoffset)*36}
         else {a.gpu_scroll-=f32(yoffset)*36}
@@ -775,7 +786,7 @@ scroll_callback :: proc "c" (window:glfw.WindowHandle,xoffset,yoffset:f64) {
         else if a.view==.Memory {a.memory_scroll-=f32(yoffset)*36}
         else {a.process_scroll[int(a.view)]-=f32(yoffset)*36}
         a.dirty=true
-    } else if a.view==.Overview&&f32(y)>=72&&f32(y)<a.height-28 {
+    } else if a.view==.Overview&&f32(y)>=72&&f32(y)<a.height-a.content_x {
         a.overview_scroll-=f32(yoffset)*36
         a.dirty=true
     }
@@ -789,8 +800,8 @@ cursor_callback :: proc "c" (window:glfw.WindowHandle,x,y:f64) {
     if graph_control_hovered(a,f32(ui_x),f32(ui_y))>=0||graph_control_hovered(a,a.mouse_x,a.mouse_y)>=0 {a.dirty=true}
     machine_pointer_motion(a,f32(ui_x),f32(ui_y))
     px,pw:=a.persistence_x,a.persistence_w
-    persistence_hover:=f32(ui_x)>=px-5&&f32(ui_x)<px+pw+5&&f32(ui_y)>=24&&f32(ui_y)<54
-    was_persistence_hover:=a.mouse_x>=px-5&&a.mouse_x<px+pw+5&&a.mouse_y>=24&&a.mouse_y<54
+    persistence_hover:=f32(ui_x)>=px-5&&f32(ui_x)<px+pw+5&&f32(ui_y)>=a.content_x&&f32(ui_y)<a.content_x+28
+    was_persistence_hover:=a.mouse_x>=px-5&&a.mouse_x<px+pw+5&&a.mouse_y>=a.content_x&&a.mouse_y<a.content_x+28
     if persistence_hover||was_persistence_hover {a.dirty=true}
     if process_freeze_hovered(a,f32(ui_x),f32(ui_y))||process_freeze_hovered(a,a.mouse_x,a.mouse_y) {a.dirty=true}
     if graph_freeze_hovered(a,f32(ui_x),f32(ui_y))||graph_freeze_hovered(a,a.mouse_x,a.mouse_y) {a.dirty=true}

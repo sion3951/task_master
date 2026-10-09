@@ -222,7 +222,7 @@ persistence_windows_running :: proc()->bool {
     defer win32.CloseHandle(event)
     return win32.WaitForSingleObject(event,0)==win32.WAIT_TIMEOUT
 }
-persistence_service_set :: proc(a:^App,enable:bool,refresh_only:bool=false,force_restart:bool=false)->bool {
+persistence_platform_service_set :: proc(a:^App,enable:bool,refresh_only:bool=false,force_restart:bool=false)->bool {
     task:=persistence_windows_ps_quote(persistence_windows_task_name())
     if !enable {
         ok,output:=persistence_windows_command(fmt.tprintf("$t=Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue; if ($t) { Disable-ScheduledTask -InputObject $t | Out-Null }",task))

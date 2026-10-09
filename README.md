@@ -4,9 +4,9 @@ A native Linux, Windows and macOS system monitor combining the CPU, memory and
 process information you would look for in btop with the NVIDIA information you
 would look for in nvtop. Written in Odin, rendered directly with Vulkan.
 
-## Version 1.0.0
+## Version 1.0.1
 
-- Overview, CPU, GPU and Mem+Disk dashboards with live graphs and process tables.
+- Overview, CPU, GPU and Mem+IO dashboards with live graphs and process tables.
 - Local and SSH-connected machines in one window, with automatic collector deployment.
 - Process grouping, sorting, pinning, PID expansion and process termination.
 - Optional background persistence that keeps recent history while the window is closed.
@@ -14,10 +14,10 @@ would look for in nvtop. Written in Odin, rendered directly with Vulkan.
 
 Download installers from this repository's **Releases** page: Linux AppImage or
 Debian package (x64/ARM64), Windows x64 setup executable, or macOS package
-(Intel/Apple Silicon). Windows 11 ARM64 uses x64 emulation. The `v1.0.0` tag
+(Intel/Apple Silicon). Windows 11 ARM64 uses x64 emulation. The `v1.0.1` tag
 starts the installer workflow; downloads appear after all builds succeed.
-See the [v1.0.0 release notes](docs/releases/v1.0.0.md) for platform requirements
-and current limitations, and the installation sections below for details.
+See the [v1.0.1 release notes](docs/releases/v1.0.1.md) for UI fixes and download
+details, and the installation sections below for platform requirements.
 
 The application name is exactly `task_master`. Debian uses `task-master` for
 its internal package ID, and macOS uses `dev.task-master.desktop` for its bundle
@@ -39,7 +39,7 @@ cut off by the line. Utilisation fills match the green/amber/red colour of a
 line at that height; fixed-colour traces retain their hue. Opacity runs from
 3% at the bottom to 8% at the top, retaining a faint tint at zero. Fills sit
 behind all traces, including RAM series, and stay anchored when scrolled.
-In CPU, GPU and Mem+Disk, the inspected time appears beside the cursor inside
+In CPU, GPU and Mem+IO, the inspected time appears beside the cursor inside
 the hovered graph, switching sides near its edge. A pinned time stays attached
 to the graph where it was selected; narrow windows retain the label.
 
@@ -105,14 +105,14 @@ private to task_master, so an older system GLFW does not remove functionality.
 notices are included; use `THIRD_PARTY_LICENSE_DIR` for custom dependency notices.
 
 ```sh
-chmod +x task_master-1.0.0-x86_64.AppImage
-./task_master-1.0.0-x86_64.AppImage
+chmod +x task_master-1.0.1-x86_64.AppImage
+./task_master-1.0.1-x86_64.AppImage
 # Or install directly from a terminal:
-./task_master-1.0.0-x86_64.AppImage --install
+./task_master-1.0.1-x86_64.AppImage --install
 # Optional portable launch without installation:
-./task_master-1.0.0-x86_64.AppImage --run
+./task_master-1.0.1-x86_64.AppImage --run
 # Debian/Ubuntu installs power access as part of package configuration:
-sudo apt install ./task_master_1.0.0_amd64.deb
+sudo apt install ./task_master_1.0.1_amd64.deb
 ```
 
 Opening the AppImage starts installation and requests administrator authorization.
@@ -126,7 +126,7 @@ Remove it with `/opt/task_master/AppRun --remove`, or the original AppImage
 with `--remove`; preferences and histories are retained.
 
 AppImages also install or run without FUSE using
-`APPIMAGE_EXTRACT_AND_RUN=1 ./task_master-1.0.0-x86_64.AppImage`
+`APPIMAGE_EXTRACT_AND_RUN=1 ./task_master-1.0.1-x86_64.AppImage`
 (add `--run` for portable use).
 OpenSSH and the user's existing keys/configuration remain on the host.
 Persistence copies packaged libraries/plugins into its stable per-user runtime,
@@ -376,7 +376,7 @@ used by other software. User preferences are retained.
 
 - The header clock beside Persistence shows local time as **HH:MM:SS** and keeps
   ticking while telemetry is paused.
-- Click a top-right navigation label or press **1–4** for Overview, CPU, GPU, Mem+Disk.
+- Click a top-right navigation label or press **1–4** for Overview, CPU, GPU, Mem+IO.
 - Click **Persistence**, just to the left of Overview, to keep sampling Local and
   saved SSH machines after the window closes. It is off by default. Enabling it
   starts a systemd user service and restores its latest 300 seconds of graph
@@ -451,9 +451,15 @@ used by other software. User preferences are retained.
   moment, or click to pin it, including temperature and fan readings. Scroll
   over the graphs to move the view, and inside the GPU process table to browse
   its groups. Taller windows expand the histories and process list.
-- Mem+Disk uses the same unboxed layout for RAM and swap, with disk read/write
+- Mem+IO uses the same unboxed layout for RAM and swap, with disk read/write
   in the left half and network receive/transmit in the right half. Each I/O pair
   shares an automatically scaled throughput axis.
+  I/O summaries show Total bytes and Max rate since persistence was last
+  enabled. They reset on enabling, survive window/service restarts, and include
+  background sampling beyond the five-minute graph window. Totals integrate
+  recorded rates; disconnected intervals are omitted.
+  When no swap or pagefile is configured, its graph and summary are hidden and
+  the remaining graphs use the freed space.
   RAM is plotted in GB with distinct, fixed colours for used, free, cache,
   buffers and available memory; its legend follows hover/pinning. The ceiling
   covers total RAM using 4, 8, 12, 16, 24, 32, 48, 64 GB and larger steps.
@@ -781,7 +787,7 @@ stage; worker stages overlap the main thread and should not be summed.
 `--capture` saves an actual Vulkan-rendered PNG after
 three seconds, then exits; compression can extend the total run time.
 
-Version 1.0.0 displays the first NVIDIA device in summary graphs, collects up
+Version 1.0.1 displays the first NVIDIA device in summary graphs, collects up
 to eight GPUs, 256 logical cores, 16,384 system PIDs and 2,048 GPU PIDs.
 Process tables sort and scroll through all collected groups.
 Non-NVIDIA GPU telemetry is not implemented yet. A missing device or unsupported

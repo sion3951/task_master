@@ -13,6 +13,7 @@ graph_freeze_capture :: proc(m:^Machine) {
     if m.state!=nil {
         live:=m.state
         metrics_display_copy(&frozen.metrics,&live.metrics)
+        frozen.io_summary=live.io_summary
         frozen.history=live.history;frozen.cpu_history=live.cpu_history
         frozen.history_count,frozen.history_next=live.history_count,live.history_next
         frozen.cpu_pinned_slot,frozen.cpu_pinned_graph=live.cpu_pinned_slot,live.cpu_pinned_graph
@@ -203,10 +204,11 @@ graph_page_draw :: proc(a:^App) {
 
 graph_freeze_hovered :: proc(a:^App,x,y:f32)->bool {
     return !a.machine_menu&&!a.machine_dialog&&!a.process_menu_open&&
-        x>=a.graph_freeze_x&&x<a.graph_freeze_x+a.graph_freeze_w&&y>=25&&y<53
+        x>=a.graph_freeze_x&&x<a.graph_freeze_x+a.graph_freeze_w&&y>=a.content_x&&y<a.content_x+28
 }
 
 graph_freeze_control :: proc(a:^App,right:f32)->f32 {
+    y:=a.content_x
     compact:=a.width<1100
     label:="Frozen" if a.graphs_frozen else "Freeze"
     w:=f32(28)
@@ -214,11 +216,11 @@ graph_freeze_control :: proc(a:^App,right:f32)->f32 {
     x:=right-w-12
     a.graph_freeze_x,a.graph_freeze_w=x,w
     hovered:=graph_freeze_hovered(a,a.mouse_x,a.mouse_y)
-    if hovered&&hit(a,x,25,w,28) {graph_freeze_toggle(a)}
+    if hovered&&hit(a,x,y,w,28) {graph_freeze_toggle(a)}
     tint:=CYAN if a.graphs_frozen else (TEXT if hovered else SOFT)
-    if hovered||a.graphs_frozen {rounded_rect(a,x,25,w,28,5,LINE)}
-    process_snowflake(a,x+14,39,tint)
-    if !compact {text(a,"Frozen" if a.graphs_frozen else "Freeze",x+34,43,12,tint)}
+    if hovered||a.graphs_frozen {rounded_rect(a,x,y,w,24,5,LINE)}
+    process_snowflake(a,x+14,y+12,tint)
+    if !compact {text(a,"Frozen" if a.graphs_frozen else "Freeze",x+34,y+16,12,tint)}
     return x
 }
 
@@ -228,8 +230,8 @@ graph_freeze_message :: proc(a:^App) {
     if a.graphs_frozen {label=fmt.tprintf("Frozen at %s / resume all graphs / F",platform_clock_text(a.graphs_frozen_at))}
     w:=min(a.width-16,renderer_text_width(&a.renderer,label,12*a.scale)/a.scale+24)
     x:=clamp(a.graph_freeze_x,8,max(8,a.width-w-8))
-    panel(a,x,60,w,30)
-    fit_text(a,label,x+12,80,w-24,12,SOFT)
+    panel(a,x,a.content_x+36,w,30)
+    fit_text(a,label,x+12,a.content_x+56,w-24,12,SOFT)
 }
 
 history_end_label :: proc(a:^App)->string {

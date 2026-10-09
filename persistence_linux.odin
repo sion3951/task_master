@@ -173,7 +173,7 @@ WantedBy=default.target
     return true,true
 }
 // Service commands run synchronously only for terminal control or on a worker.
-persistence_service_set :: proc(a:^App,enable:bool,refresh_only:bool=false,force_restart:bool=false)->bool {
+persistence_platform_service_set :: proc(a:^App,enable:bool,refresh_only:bool=false,force_restart:bool=false)->bool {
     updated:=false
     if enable {
         installed:bool
