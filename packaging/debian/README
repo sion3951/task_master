@@ -1,0 +1,28 @@
+task_master Debian packaging
+
+The internal Debian package ID is task-master because Debian package IDs
+cannot contain underscores. The application and executable are task_master.
+
+The package installs the unprivileged desktop in /usr/bin/task_master and its
+headless hardware collector in /usr/libexec/task_master/collector. postinst grants
+only CAP_PERFMON to that collector. The collector opens package-energy counters
+and drops the capability before sampling. The grant requires Linux 5.8+ and a
+filesystem supporting Linux file capabilities. A failed grant fails package
+configuration with a diagnostic rather than silently removing CPU power.
+
+GLFW 3.4 is shipped privately in /usr/lib/task_master, preserving both Wayland and
+X11 behavior on distributions whose system GLFW is older. FreeType and the
+libraries linked by GLFW are resolved through generated Debian dependencies.
+X11, Wayland and libdecor runtime packages are declared explicitly because GLFW
+loads them dynamically; their absence must not remove either display backend.
+Vulkan uses the host's Vulkan loader and graphics drivers. OpenSSH uses the
+user's existing keys, agent and configuration.
+
+Installing, upgrading or removing the package never enables background
+persistence for users, deletes their saved settings/history, or changes their
+user services. Persistence remains an in-app choice.
+
+Build on a matching Debian/Ubuntu architecture after building the native app
+and collector. dpkg-shlibdeps uses the build host's actual symbol metadata to
+calculate minimum library versions; build release binaries on the oldest
+supported distribution rather than transferring binaries from a newer host.

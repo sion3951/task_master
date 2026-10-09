@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+    configure|abort-upgrade|abort-remove|abort-deconfigure)
+        collector=/usr/libexec/task_master/collector
+        if [ -f "$collector" ]; then
+            # Only the headless helper receives the narrow energy-counter grant.
+            # The desktop and user persistence service remain unprivileged.
+            if ! setcap cap_perfmon=ep "$collector"; then
+                echo 'task_master: could not grant CAP_PERFMON to the collector.' >&2
+                echo 'CPU power requires Linux 5.8+ and a filesystem supporting file capabilities.' >&2
+                echo 'Fix the filesystem/capability support, then run: sudo dpkg --configure task-master' >&2
+                exit 1
+            fi
+            if ! getcap "$collector" | grep -F 'cap_perfmon=ep' >/dev/null; then
+                echo 'task_master: the collector capability grant did not persist.' >&2
+                exit 1
+            fi
+        fi
+        ;;
+esac
+exit 0

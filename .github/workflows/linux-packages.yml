@@ -1,0 +1,254 @@
+name: Installers
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (blank uses the tag or 0.0.0+git.<commit>)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Set installer version
+    runs-on: ubuntu-22.04
+    outputs:
+      package: ${{ steps.version.outputs.package }}
+    steps:
+      - name: Resolve version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          version=$REQUESTED_VERSION
+          if [ -z "$version" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then version=${GITHUB_REF_NAME#v};
+            else version=0.0.0+git.$(printf '%s' "$GITHUB_SHA" | cut -c 1-12); fi
+          fi
+          case "$version" in [0-9]*) ;; *) echo 'Version must start with a digit.' >&2; exit 1 ;; esac
+          case "$version" in *[!0-9A-Za-z.+~\-]*) echo 'Invalid package version.' >&2; exit 1 ;; esac
+          printf 'package=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+  linux-collectors:
+    name: Linux collector (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    steps:
+      - name: Install collector build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git file clang build-essential
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Odin
+        run: sh scripts/ci/setup-odin.sh
+      - name: Build native collector
+        run: sh scripts/build-collectors.sh --arch native
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: collector-linux-${{ matrix.arch }}
+          path: build/task_master-collector-linux-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-collector:
+    name: Windows collector (x64 and Windows 11 ARM64 emulation)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Odin
+        shell: pwsh
+        run: scripts/ci/setup-odin-windows.ps1
+      - name: Build and name Windows payloads
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $visualStudio) { throw 'Visual Studio x64 build tools were not found.' }
+          Import-Module (Join-Path $visualStudio 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $visualStudio -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
+          & scripts/build-windows.ps1 -CollectorOnly
+          if ($LASTEXITCODE -ne 0) { throw 'Windows collector build failed.' }
+          New-Item -ItemType Directory -Force -Path build/collectors | Out-Null
+          Copy-Item build/windows/task_master-collector.exe build/collectors/task_master-collector-windows-amd64
+          Copy-Item build/windows/task_master-collector.exe build/collectors/task_master-collector-windows-arm64
+          Copy-Item build/task_master-windows-sensors.zip build/collectors/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: collector-windows
+          path: |
+            build/collectors/task_master-collector-windows-*
+            build/collectors/task_master-windows-sensors.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-collectors:
+    name: macOS collectors (Intel and Apple Silicon)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Odin
+        run: sh scripts/ci/setup-odin.sh
+      - name: Build both macOS collectors with the native SDK
+        run: sh scripts/build-macos.sh --collector-only --arch all
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: collector-darwin
+          path: build/task_master-collector-darwin-*
+          if-no-files-found: error
+          retention-days: 7
+
+  packages:
+    name: AppImage and Debian package (${{ matrix.arch }})
+    env:
+      PACKAGE_VERSION: ${{ needs.version.outputs.package }}
+    needs: [version, linux-collectors, windows-collector, macos-collectors]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    steps:
+      - name: Install checkout tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install native packaging dependencies and GLFW 3.4
+        run: sh scripts/ci/setup-linux.sh
+      - name: Install pinned Odin
+        run: sh scripts/ci/setup-odin.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: collector-*
+          merge-multiple: true
+          path: build/collectors
+      - name: Build release with all six remote payloads
+        run: |
+          chmod 755 build/collectors/task_master-collector-*
+          make release COLLECTOR_ARGS='--linux-dir build/collectors --windows-dir build/collectors --mac-dir build/collectors'
+      - name: Package AppImage and Debian archive
+        run: |
+          sh scripts/build-appimage.sh --version "$PACKAGE_VERSION" --output-dir build/packages --build-dir build
+          sh scripts/build-deb.sh --version "$PACKAGE_VERSION" --output-dir build/packages --build-dir build
+          cd build/packages
+          sha256sum *.AppImage *.deb > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-packages-${{ matrix.arch }}
+          path: build/packages/*
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-package:
+    name: Windows setup executable (x64 and ARM64 emulation)
+    needs: [version, linux-collectors, windows-collector, macos-collectors]
+    runs-on: windows-2022
+    env:
+      PACKAGE_VERSION: ${{ needs.version.outputs.package }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Odin
+        shell: pwsh
+        run: scripts/ci/setup-odin-windows.ps1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: collector-*
+          merge-multiple: true
+          path: build/collectors
+      - name: Build desktop, sensors and setup executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $visualStudio) { throw 'Visual Studio x64 build tools were not found.' }
+          Import-Module (Join-Path $visualStudio 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $visualStudio -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
+          & scripts/build-windows.ps1 -Version $env:PACKAGE_VERSION -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-packages
+          path: build/packages/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  macos-package:
+    name: macOS installer packages (Intel and Apple Silicon)
+    needs: [version, linux-collectors, windows-collector, macos-collectors]
+    runs-on: macos-15
+    env:
+      PACKAGE_VERSION: ${{ needs.version.outputs.package }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Odin
+        run: sh scripts/ci/setup-odin.sh
+      - name: Prepare macOS 13 runtime libraries and shader compiler
+        run: sh scripts/ci/setup-macos.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: collector-*
+          merge-multiple: true
+          path: build/collectors
+      - name: Build both desktop and installer architectures
+        run: sh scripts/build-macos.sh --arch all --version "$PACKAGE_VERSION"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-packages
+          path: build/packages/*.pkg
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Attach installers to tagged release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [packages, windows-package, macos-package]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: "*-packages*"
+          merge-multiple: true
+          path: packages
+      - name: Publish packages and combined checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd packages
+          sha256sum *.AppImage *.deb *.exe *.pkg > SHA256SUMS
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            notes="$GITHUB_WORKSPACE/docs/releases/$RELEASE_TAG.md"
+            if [ -f "$notes" ]; then
+              gh release create "$RELEASE_TAG" --verify-tag --notes-file "$notes" --title "task_master $RELEASE_TAG"
+            else
+              gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "task_master $RELEASE_TAG"
+            fi
+          fi
+          gh release upload "$RELEASE_TAG" --clobber *.AppImage *.deb *.exe *.pkg SHA256SUMS

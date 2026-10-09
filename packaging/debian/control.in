@@ -1,0 +1,15 @@
+Package: task-master
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCHITECTURE@
+Maintainer: @MAINTAINER@
+Installed-Size: @INSTALLED_SIZE@
+Depends: @DEPENDS@
+Recommends: systemd, dbus-user-session, libdecor-0-plugin-1-cairo | libdecor-0-plugin-1-gtk
+Description: GPU-rendered system and remote machine monitor
+ Native CPU, memory, process, GPU, disk and network monitoring with SSH
+ collectors, history and optional per-user background persistence.
+ The desktop runs as the logged-in user. A separate headless collector has
+ CAP_PERFMON to read hardware energy counters and drops the capability after
+ opening those counters.

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CPU graph concepts</title>
+<style>
+body{margin:0;background:transparent;font-family:system-ui,sans-serif}
+#cpu-concept{--cpu-bg:#000;--cpu-panel:#0b0b0b;--cpu-line:#242424;--cpu-text:#ededed;--cpu-muted:#aaa;--cpu-purple:#b387fa;--cpu-amber:#f5b863;--cpu-cyan:#52cadb;color:var(--cpu-text);font-size:13px;line-height:1.45}
+#cpu-concept *{box-sizing:border-box}#cpu-concept button,#cpu-concept select{font:inherit;color:inherit;background:#151515;border:1px solid #333;border-radius:5px;padding:7px 10px}
+#cpu-concept button{cursor:pointer}#cpu-concept button[aria-pressed=true]{background:#333;border-color:#555}#cpu-concept .demo{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:0 0 12px;color:var(--foreground,#ededed)}#cpu-concept .demo select{color:var(--cpu-text)}
+#cpu-concept .surface{background:var(--cpu-bg);padding:20px;border-radius:8px}#cpu-concept header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}#cpu-concept h2{font-size:20px;font-weight:500;margin:0}#cpu-concept .model{font-size:12px;color:var(--cpu-muted);margin-top:3px}#cpu-concept .tag{color:var(--cpu-muted);font-size:11px;letter-spacing:.07em;text-transform:uppercase}#cpu-concept .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0 16px}#cpu-concept .value{font-size:26px;letter-spacing:-.04em;font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap}#cpu-concept .value small{font-size:13px;letter-spacing:0;font-weight:400}#cpu-concept .label{font-size:12px;color:var(--cpu-muted)}#cpu-concept .history{background:var(--cpu-panel);padding:12px 12px 8px;border-radius:6px}#cpu-concept .chart-label{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;color:var(--cpu-muted);font-size:11px}#cpu-concept .legend{display:flex;gap:14px;flex-wrap:wrap}#cpu-concept .swatch{display:inline-block;width:14px;height:2px;background:var(--cpu-purple);vertical-align:middle;margin-right:5px}#cpu-concept .swatch.threads{background:#aaa;border-top:1px dashed #aaa;height:0}#cpu-concept .swatch.power{background:var(--cpu-amber)}#cpu-concept .swatch.freq{background:var(--cpu-cyan)}#cpu-concept svg{display:block;width:100%;overflow:visible}#cpu-concept svg text{font-family:inherit;font-size:11px;fill:var(--cpu-muted)}#cpu-concept .timeline{display:flex;justify-content:space-between;font-size:11px;color:var(--cpu-muted);padding:2px 0 0 32px}#cpu-concept .readout{min-height:22px;margin-top:6px;color:var(--cpu-muted);font-size:11px;font-variant-numeric:tabular-nums}#cpu-concept .cores-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:20px 0 12px}#cpu-concept h3{font-size:13px;font-weight:500;margin:0}#cpu-concept .cores{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}#cpu-concept .core{background:var(--cpu-panel);padding:12px;border-radius:6px;min-width:0}#cpu-concept .core-head{display:flex;justify-content:space-between;gap:6px;font-size:12px}#cpu-concept .core-busy{font-size:19px;font-variant-numeric:tabular-nums;margin:8px 0 2px}#cpu-concept .core-freq{font-size:11px;color:var(--cpu-muted)}#cpu-concept .spark{margin:4px 0 9px}#cpu-concept .thread-row{display:grid;grid-template-columns:42px 1fr 30px;gap:6px;align-items:center;font-size:11px;margin-top:5px;color:var(--cpu-muted);font-variant-numeric:tabular-nums}#cpu-concept .track{height:4px;background:#262626;border-radius:1px;overflow:hidden}#cpu-concept .fill{height:100%;background:var(--cpu-purple)}#cpu-concept .thread-row.second .fill{opacity:.5}#cpu-concept .note{font-size:11px;color:var(--cpu-muted);margin:12px 0 0}#cpu-concept .core-note{font-size:11px;color:var(--cpu-muted);margin:7px 0 0}#cpu-concept .guide{stroke:#aaa;stroke-width:1;opacity:.6;pointer-events:none}#cpu-concept .hit{fill:transparent;cursor:crosshair;touch-action:pan-y}#cpu-concept .range{fill:var(--cpu-purple);opacity:.15}#cpu-concept .grid{stroke:var(--cpu-line);stroke-width:1}
+@media(max-width:600px){#cpu-concept .surface{padding:14px}#cpu-concept .stats{grid-template-columns:repeat(2,1fr);gap:12px 20px;margin-top:18px}#cpu-concept .cores{grid-template-columns:repeat(2,minmax(0,1fr))}#cpu-concept .value{font-size:25px}#cpu-concept .model{max-width:220px}}
+</style></head>
+<body><div id="cpu-concept">
+<div class="demo"><span>Concept · illustrative sensor data</span><label>Example <select id="workload" aria-label="Illustrative workload"><option value="single">One busy thread per core</option><option value="both">Both sibling threads busy</option><option value="uneven">Uneven load</option></select></label></div>
+<section class="surface" aria-label="task_master CPU graph concept">
+<header><div><h2>CPU</h2><div class="model">AMD Ryzen 7 9800X3D · 8 cores / 16 threads</div></div><span class="tag">SMT paired · 60 seconds</span></header>
+<div class="stats"><div><div class="label">Physical cores busy</div><div class="value" id="total-busy"></div></div><div><div class="label">Logical threads busy</div><div class="value" id="total-threads"></div></div><div><div class="label">CPU package power</div><div class="value" id="total-power"></div></div><div><div class="label">Active mean frequency</div><div class="value" id="total-freq"></div></div></div>
+<div class="history" aria-label="Aligned CPU histories">
+<div class="chart-label"><span>BUSY TIME · %</span><span class="legend"><span><i class="swatch"></i>Cores · range</span><span><i class="swatch threads"></i>Threads · mean</span></span></div>
+<svg id="busy-chart" role="img" aria-label="Physical core busy range and logical thread mean over the past sixty seconds" height="112"></svg>
+<div class="chart-label"><span><i class="swatch power"></i>PACKAGE POWER · W</span><span id="power-label"></span></div><svg id="power-chart" role="img" aria-label="CPU package power over the same time interval" height="64"></svg>
+<div class="chart-label"><span><i class="swatch freq"></i>ACTIVE FREQUENCY · GHz</span><span id="freq-label"></span></div><svg id="freq-chart" role="img" aria-label="Mean active core frequency over the same time interval" height="64"></svg>
+<div class="timeline"><span>−60 s</span><span>−30 s</span><span>Now</span></div>
+<div class="readout" id="readout">Move across a graph to compare the same moment. Tap to pin.</div>
+</div>
+<div class="cores-head"><h3>Physical cores <span class="tag"> / sibling threads grouped</span></h3></div>
+<div id="cores" class="cores" aria-label="Per core busy history, frequency and sibling activity"></div>
+<p class="note" id="scenario-note"></p>
+<p class="core-note">Core busy = time at least one sibling runs. Shading shows uncertain overlap; busy time does not measure throughput saturation.</p>
+</section></div>
+<script>
+(() => {
+const root=document.getElementById('cpu-concept'),NS='http://www.w3.org/2000/svg',state={scenario:'single'},samples=61;
+let data=[],hover=null,pinned=false;
+const el=id=>root.querySelector('#'+id),avg=arr=>arr.reduce((a,b)=>a+b,0)/arr.length,clamp=v=>Math.max(0,Math.min(100,v));
+function makeData(){
+ data=Array.from({length:samples},(_,t)=>{
+  const ramp=t<12?.10+.025*t:t<25?.4+(t-12)*.046:t<38?.88+.08*Math.sin(t*1.1):1;
+  const cores=Array.from({length:8},(_,c)=>{
+   let a,b;
+   if(state.scenario==='single'){a=t>=38?100:clamp(ramp*100+Math.sin(t*.45+c)*4);b=0}
+   else if(state.scenario==='both'){a=t>=38?100:clamp(ramp*100+Math.sin(t*.45+c)*4);b=t<18?0:t>=38?100:clamp((t-18)/20*100)}
+   else{const end=[[100,0],[92,24],[64,28],[35,15],[12,0],[82,5],[48,0],[0,0]][c];a=t===60?end[0]:clamp(end[0]*ramp+Math.sin(t*.6+c)*5);b=t===60?end[1]:clamp(end[1]*ramp+Math.cos(t*.4+c)*2)}
+   const lo=Math.max(a,b),hi=Math.min(100,a+b),freq=lo<1?0:4.65+.45*ramp+Math.sin(t*.2+c)*.06-(state.scenario==='both'?.16*b/100:0);
+   return {a,b,lo,hi,freq};
+  });
+  const lo=avg(cores.map(c=>c.lo)),hi=avg(cores.map(c=>c.hi)),threads=avg(cores.map(c=>(c.a+c.b)/2)),weight=cores.reduce((s,c)=>s+c.lo,0);
+  const freq=weight?cores.reduce((s,c)=>s+c.freq*c.lo,0)/weight:0,power=21+.71*lo+.19*avg(cores.map(c=>c.b))+Math.sin(t*.3)*.8;
+  return {cores,lo,hi,threads,freq,power};
+ });
+}
+function s(svg,name,attrs){const n=document.createElementNS(NS,name);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,v));svg.appendChild(n);return n}
+function line(points){return points.map(([x,y],i)=>(i?'L':'M')+x.toFixed(2)+','+y.toFixed(2)).join(' ')}
+function rangeText(lo,hi){return Math.round(lo)===Math.round(hi)?Math.round(lo)+'%':Math.round(lo)+'–'+Math.round(hi)+'%'}
+function chart(svg,keys,max,height,spark=false,core=-1){
+ const width=Math.max(60,svg.getBoundingClientRect().width),left=spark?0:32,right=3,top=spark?3:8,bottom=spark?3:7,w=width-left-right,h=height-top-bottom;
+ svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.replaceChildren();
+ const x=t=>left+w*t/60,y=v=>top+h*(1-v/max),series=core<0?data:data.map(d=>d.cores[core]);
+ if(!spark){[0,max/2,max].forEach(v=>{s(svg,'line',{x1:left,x2:width-right,y1:y(v),y2:y(v),class:'grid'});const n=s(svg,'text',{x:left-6,y:y(v)+3,'text-anchor':'end'});n.textContent=max<10?v.toFixed(1):Math.round(v)})}
+ if(keys.includes('lo')){const p=series.map((d,t)=>[x(t),y(d.hi)]).concat(series.map((d,t)=>[x(t),y(d.lo)]).reverse());s(svg,'path',{d:line(p)+'Z',class:'range'})}
+ keys.forEach(key=>{const color={lo:'var(--cpu-purple)',threads:'#aaa',power:'var(--cpu-amber)',freq:'var(--cpu-cyan)'}[key];s(svg,'path',{d:line(series.map((d,t)=>[x(t),y(d[key])])),fill:'none',stroke:color,'stroke-width':spark?1.4:1.8,...(key==='threads'?{'stroke-dasharray':'4 4'}:{})})});
+ if(!spark){const g=s(svg,'line',{x1:x(hover??60),x2:x(hover??60),y1:top,y2:height-bottom,class:'guide','data-guide':''});g.style.display=hover===null?'none':'block';
+  const hit=s(svg,'rect',{x:left,y:0,width:w,height,class:'hit'});
+  const locate=e=>Math.round(Math.max(0,Math.min(60,(e.clientX-svg.getBoundingClientRect().left-left)/w*60)));
+  hit.addEventListener('pointermove',e=>{if(e.pointerType==='mouse'&&!pinned){hover=locate(e);updateSelection()}});
+  hit.addEventListener('pointerleave',()=>{if(!pinned){hover=null;updateSelection()}});
+  hit.addEventListener('click',e=>{const t=locate(e);if(pinned&&hover===t){pinned=false;hover=null}else{pinned=true;hover=t}updateSelection()});
+ }
+}
+function updateSelection(){
+ const d=data[hover??60];el('total-busy').textContent=rangeText(d.lo,d.hi);el('total-threads').textContent=Math.round(d.threads)+'%';el('total-power').innerHTML=Math.round(d.power)+' <small>W</small>';el('total-freq').innerHTML=d.freq.toFixed(2)+' <small>GHz</small>';
+ el('power-label').textContent=Math.round(d.power)+' W';el('freq-label').textContent=d.freq.toFixed(2)+' GHz';
+ el('readout').textContent=hover===null?'Move across a graph to compare the same moment. Tap to pin.':`${hover===60?'Now':'−'+(60-hover)+' s'} · cores ${rangeText(d.lo,d.hi)} · threads ${Math.round(d.threads)}% · ${Math.round(d.power)} W · ${d.freq.toFixed(2)} GHz${pinned?' · pinned':''}`;
+ ['busy-chart','power-chart','freq-chart'].forEach(id=>{const svg=el(id),g=svg.querySelector('[data-guide]');if(g){const w=svg.getBoundingClientRect().width;g.setAttribute('x1',32+(w-35)*(hover??60)/60);g.setAttribute('x2',32+(w-35)*(hover??60)/60);g.style.display=hover===null?'none':'block'}});
+ root.querySelectorAll('.core').forEach((card,c)=>{const v=d.cores[c];card.querySelector('.core-busy').textContent=rangeText(v.lo,v.hi);card.querySelector('.core-freq').textContent=v.freq?v.freq.toFixed(2)+' GHz':'Idle';['a','b'].forEach(k=>{card.querySelector('[data-thread='+k+'] .fill').style.width=v[k]+'%';card.querySelector('[data-thread='+k+'] .pct').textContent=Math.round(v[k])+'%'})});
+}
+function draw(){
+ chart(el('busy-chart'),['lo','threads'],100,112);chart(el('power-chart'),['power'],140,64);chart(el('freq-chart'),['freq'],6,64);
+ root.querySelectorAll('.spark').forEach((svg,c)=>chart(svg,['lo'],100,32,true,c));updateSelection();
+}
+function render(){
+ el('cores').replaceChildren();
+ for(let c=0;c<8;c++){const card=document.createElement('div');card.className='core';card.innerHTML=`<div class="core-head"><span>Core ${c}</span><span class="core-freq"></span></div><div class="core-busy"></div><svg class="spark" height="32" role="img" aria-label="Core ${c} physical busy range history"></svg><div class="siblings"><div class="thread-row" data-thread="a"><span>CPU ${c}</span><div class="track"><div class="fill"></div></div><span class="pct"></span></div><div class="thread-row second" data-thread="b"><span>CPU ${c+8}</span><div class="track"><div class="fill"></div></div><span class="pct"></span></div></div>`;el('cores').appendChild(card)}
+ el('scenario-note').textContent={single:'8 / 8 cores continuously busy · 8 / 16 threads busy. The idle siblings share cores already doing work.',both:'8 / 8 cores continuously busy · 16 / 16 threads busy. More sibling activity does not imply twice the compute capacity.',uneven:'Uneven work across cores. Busy ranges preserve the overlap uncertainty instead of doubling the thread average.'}[state.scenario];
+ draw();
+}
+el('workload').addEventListener('change',e=>{state.scenario=e.target.value;hover=null;pinned=false;makeData();render()});
+makeData();render();new ResizeObserver(()=>draw()).observe(root.querySelector('.surface'));
+})();
+</script></body></html>

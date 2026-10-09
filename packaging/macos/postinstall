@@ -1,0 +1,8 @@
+#!/bin/sh
+# Installer runs this as root after placing the app on the system volume.
+set -eu
+[ "${3:-/}" = / ] || { printf '%s\n' 'task_master requires the running system volume.' >&2; exit 1; }
+directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Reuse the complete existing installer: app permissions, native SSH collector,
+# sensor LaunchDaemon, and safe shutdown of a previously installed sensor job.
+exec /bin/sh "$directory/install-macos.sh" --app /Applications/task_master.app

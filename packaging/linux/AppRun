@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case ${1:-} in
+    --run) shift ;;
+    --install|--remove|'')
+        exec sh "$appdir/usr/share/task_master/install-appimage.sh" "$appdir" "$@"
+        ;;
+    --help|-h)
+        echo 'task_master installer: run without arguments to install and launch.'
+        echo '  --install              Install app, menu entry and power-access collector'
+        echo '  --remove               Uninstall; keep user preferences and histories'
+        echo '  --run [APP ARGUMENTS]   Run the portable desktop without installing'
+        echo '  --install-power-access Install only the power-access collector'
+        exit 0
+        ;;
+    --install-power-access)
+        [ "$#" -eq 1 ] || { echo 'Usage: task_master.AppImage --install-power-access' >&2; exit 2; }
+        installer=$appdir/usr/share/task_master/install-system.sh
+        collector=$appdir/usr/libexec/task_master/collector
+        # Only this explicit installation command authenticates. The desktop
+        # always runs as the calling user, with no file capabilities.
+        if [ "$(id -u)" -eq 0 ]; then exec sh "$installer" "$collector";
+        elif command -v sudo >/dev/null 2>&1; then exec sudo sh "$installer" "$collector";
+        elif command -v pkexec >/dev/null 2>&1; then exec pkexec /bin/sh "$installer" "$collector";
+        else echo 'Install sudo/polkit or run this installation command as root.' >&2; exit 1; fi
+        ;;
+esac
+if [ -d "$appdir/usr/lib/task_master/libdecor/plugins-1" ]; then
+    export LIBDECOR_PLUGIN_DIR=$appdir/usr/lib/task_master/libdecor/plugins-1
+fi
+export XLOCALEDIR=$appdir/usr/share/X11/locale
+export XKB_CONFIG_ROOT=$appdir/usr/share/X11/xkb
+export FONTCONFIG_PATH=$appdir/usr/share/task_master/fontconfig
+export FONTCONFIG_FILE=fonts.conf
+# ELF RUNPATH resolves the private libraries. Do not export LD_LIBRARY_PATH,
+# which could redirect SSH, the host GPU driver or the background service.
+exec "$appdir/usr/bin/task_master" "$@"

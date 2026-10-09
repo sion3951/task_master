@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+    remove|upgrade|deconfigure)
+        collector=/usr/libexec/task_master/collector
+        # Remove the grant before dpkg replaces/removes the executable. It is
+        # restored by postinst when a failed upgrade/removal is rolled back.
+        if [ -f "$collector" ] && command -v getcap >/dev/null 2>&1 &&
+            [ -n "$(getcap "$collector")" ]; then
+            setcap -r "$collector"
+        fi
+        ;;
+esac
+# Persistence settings, saved history and user-created services belong to their
+# users. Package removal does not authenticate as them or delete their data.
+exit 0

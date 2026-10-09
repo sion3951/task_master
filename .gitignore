@@ -1,0 +1,13 @@
+build/
+shaders/*.spv
+*.o
+sensors/windows/bin/
+sensors/windows/obj/
+
+# Local agent state and credentials never belong in the published repository.
+.agents/
+.codex/
+.aws/
+.env
+.env.*
+!.env.example

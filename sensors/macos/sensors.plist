@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.task_master.sensors</string>
+<key>ProgramArguments</key><array><string>/bin/sh</string><string>/Library/Application Support/task_master/task_master-sensors.sh</string></array>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>ProcessType</key><string>Background</string>
+<key>ThrottleInterval</key><integer>5</integer>
+<key>ExitTimeOut</key><integer>30</integer>
+<key>Umask</key><integer>18</integer>
+</dict></plist>

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=task_master
+Comment=CPU, memory, GPU and process monitor
+Exec=task_master
+Icon=task_master
+Terminal=false
+Categories=System;Monitor;
+Keywords=CPU;GPU;memory;processes;monitor;
