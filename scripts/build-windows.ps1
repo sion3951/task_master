@@ -98,7 +98,8 @@ try {
         "-define:TASK_MASTER_COLLECTOR_DARWIN_ARM64=$($macArm64.Replace('\','/'))",
         "-define:TASK_MASTER_COLLECTOR_WINDOWS_AMD64=$($collector.Replace('\','/'))",
         "-define:TASK_MASTER_COLLECTOR_WINDOWS_ARM64=$($collector.Replace('\','/'))",
-        "-define:FREETYPE_LIBRARY=$($freeType.Replace('\','/'))"
+        "-collection:task_master_freetype=$((Split-Path $freeType -Parent).Replace('\','/'))",
+        "-define:FREETYPE_LIBRARY=task_master_freetype:$(Split-Path $freeType -Leaf)"
     )
     Invoke-Checked $Odin (@('build', '.', "-out:$(Join-Path $output 'task_master.exe')", '-o:speed', '-no-bounds-check', '-vet', '-subsystem:windows', '-define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536') + $defines)
     Copy-Item 'scripts/install-windows.ps1', 'scripts/install-sensors.ps1', 'README.md' -Destination $output

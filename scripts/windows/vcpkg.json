@@ -1,5 +1,5 @@
 {
-  "name": "task_master-windows-dependencies",
+  "name": "task-master-windows-dependencies",
   "version-string": "0.1.0",
   "builtin-baseline": "0699a19d0c6386247ce50d4dedbb8217d484d536",
   "dependencies": [
