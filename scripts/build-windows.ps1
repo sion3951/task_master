@@ -79,7 +79,10 @@ try {
     if (-not $FreeTypeLibrary -or $needShaderCompiler) {
         if (-not $VcpkgRoot) { throw 'Set VCPKG_ROOT, or supply both -FreeTypeLibrary and an available -Glslc shader compiler.' }
         $vcpkg = Join-Path $VcpkgRoot 'vcpkg.exe'
-        Invoke-Checked $vcpkg @('install', '--triplet=x64-windows-static', '--host-triplet=x64-windows-static', '--x-manifest-root=scripts/windows', '--x-install-root=build/vcpkg-installed')
+        # Hosted runners can carry a shallow registry older than our pinned baseline.
+        $manifest = Get-Content 'scripts/windows/vcpkg.json' -Raw | ConvertFrom-Json
+        Invoke-Checked 'git' @('-C', $VcpkgRoot, 'fetch', '--depth=1', 'https://github.com/microsoft/vcpkg.git', $manifest.'builtin-baseline')
+        Invoke-Checked $vcpkg @('install', "--vcpkg-root=$VcpkgRoot", '--triplet=x64-windows-static', '--host-triplet=x64-windows-static', '--x-manifest-root=scripts/windows', '--x-install-root=build/vcpkg-installed')
         if (-not $FreeTypeLibrary) { $FreeTypeLibrary = 'build/vcpkg-installed/x64-windows-static/lib/freetype.lib' }
         if ($needShaderCompiler) { $Glslc = [IO.Path]::GetFullPath('build/vcpkg-installed/x64-windows-static/tools/shaderc/glslc.exe') }
     }

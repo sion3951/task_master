@@ -36,6 +36,20 @@ cmake --build "$stage/freetype-build" --parallel "$(sysctl -n hw.ncpu)"
 cmake --install "$stage/freetype-build"
 cp "$stage/freetype-2.13.3/docs/FTL.TXT" "$runtime/licenses/FreeType-FTL.txt"
 cp "$stage/freetype-2.13.3/docs/GPLv2.TXT" "$runtime/licenses/FreeType-GPLv2.txt"
+# Odin's shipped GLFW archive targets macOS 14. Build the same pinned GLFW 3.4
+# revision as Linux with a macOS 13 baseline for both desktop architectures.
+mkdir -p "$stage/glfw-source"
+git -C "$stage/glfw-source" init --quiet
+git -C "$stage/glfw-source" fetch --depth 1 https://github.com/glfw/glfw.git \
+    7b6aead9fb88b3623e3b3725ebb42670cbe4c579
+git -C "$stage/glfw-source" checkout --detach FETCH_HEAD
+cmake -S "$stage/glfw-source" -B "$stage/glfw-build" \
+    -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64' \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 -DBUILD_SHARED_LIBS=OFF \
+    -DGLFW_BUILD_DOCS=OFF -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF
+cmake --build "$stage/glfw-build" --parallel "$(sysctl -n hw.ncpu)"
+odin_root=$("${ODIN:-odin}" root)
+cp "$stage/glfw-build/src/libglfw3.a" "$odin_root/vendor/glfw/lib/darwin/libglfw3.a"
 # Official universal release, both slices verified to target macOS 12.0.
 # Digest is published in the release's GitHub API asset metadata:
 # https://github.com/KhronosGroup/MoltenVK/releases/tag/v1.4.2

@@ -103,4 +103,5 @@ stage_library(freetype)
 rewrite(executable, executable)
 for library in staged:
     tool("codesign", "--force", "--sign", identity, library)
-tool("codesign", "--force", "--sign", identity, executable)
+# build-macos.sh signs the collector and complete app after writing Info.plist.
+# Signing the main executable here makes codesign traverse the unfinished bundle.
