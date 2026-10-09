@@ -65,7 +65,7 @@ try {
             throw "Missing macOS payload $payload. Build both collectors on macOS and place them in $MacCollectorDirectory."
         }
         $bytes = [IO.File]::ReadAllBytes($payload)
-        if ($bytes.Length -lt 32 -or [BitConverter]::ToUInt32($bytes, 0) -ne 0xfeedfacf) {
+        if ($bytes.Length -lt 32 -or [BitConverter]::ToUInt32($bytes, 0) -ne 0xfeedfacfL) {
             throw "Collector payload is not a 64-bit Mach-O executable: $payload"
         }
         $cpu = [BitConverter]::ToUInt32($bytes, 4)

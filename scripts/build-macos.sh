@@ -103,9 +103,9 @@ for target_arch in $architectures; do
     fi
     [ -f "$free_type" ] || fail "Missing $target_arch FreeType dylib; set FREETYPE_$(printf '%s' "$target_arch" | tr '[:lower:]' '[:upper:]')."
     [ -n "$molten_vk" ] && [ -f "$molten_vk" ] || fail "Missing $target_arch MoltenVK dylib; set MOLTENVK_$(printf '%s' "$target_arch" | tr '[:lower:]' '[:upper:]') or VULKAN_SDK."
-    xcrun lipo -verify_arch "$apple_arch" "$free_type"
-    xcrun lipo -verify_arch "$apple_arch" "$molten_vk"
-    xcrun lipo -verify_arch "$apple_arch" "$odin_root/vendor/glfw/lib/darwin/libglfw3.a"
+    xcrun lipo "$free_type" -verify_arch "$apple_arch"
+    xcrun lipo "$molten_vk" -verify_arch "$apple_arch"
+    xcrun lipo "$odin_root/vendor/glfw/lib/darwin/libglfw3.a" -verify_arch "$apple_arch"
     output=build/macos-$target_arch
     bundle=$stage/$target_arch/task_master.app
     mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Frameworks" "$bundle/Contents/Resources/licenses"

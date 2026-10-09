@@ -162,7 +162,7 @@ fi
 verify_darwin() {
     description=$(file -b "$1")
     case "$2:$description" in
-        amd64:*Mach-O*executable*x86_64*|arm64:*Mach-O*executable*arm64*) ;;
+        amd64:*Mach-O*executable*x86_64*|amd64:*Mach-O*x86_64*executable*|arm64:*Mach-O*executable*arm64*|arm64:*Mach-O*arm64*executable*) ;;
         *) fail "Collector does not match macOS $2: $1 ($description)" ;;
     esac
 }

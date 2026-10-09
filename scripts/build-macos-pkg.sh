@@ -50,7 +50,7 @@ PY
 )
 for binary in task_master task_master-collector; do
     [ -x "$source_app/Contents/MacOS/$binary" ] || fail "Incomplete app bundle: $source_app"
-    lipo -verify_arch "$apple_arch" "$source_app/Contents/MacOS/$binary"
+    lipo "$source_app/Contents/MacOS/$binary" -verify_arch "$apple_arch"
 done
 codesign --verify --strict "$source_app"
 mkdir -p build "$output_dir"

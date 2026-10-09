@@ -46,7 +46,7 @@ mkdir -p "$runtime/moltenvk"
 cp "$stage/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib" "$runtime/moltenvk/"
 cp "$stage/MoltenVK/LICENSE" "$runtime/licenses/MoltenVK.txt"
 for library in "$runtime/freetype/lib/libfreetype.dylib" "$runtime/moltenvk/libMoltenVK.dylib"; do
-    xcrun lipo -verify_arch x86_64 arm64 "$library"
+    xcrun lipo "$library" -verify_arch x86_64 arm64
 done
 # App packaging also checks every bundled library's minimum deployment target
 # and non-system imports, then thins the universal libraries for each installer.
