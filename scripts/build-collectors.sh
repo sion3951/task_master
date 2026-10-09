@@ -187,7 +187,7 @@ build_darwin() {
     elif $strict || [ -n "$mac_dir" ]; then
         fail "macOS $target_arch requires --mac-dir containing a collector built on macOS."
     else
-        return
+        return 0
     fi
     verify_darwin "$stage/darwin-$target_arch" "$target_arch"
     chmod 755 "$stage/darwin-$target_arch"
