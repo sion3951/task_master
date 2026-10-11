@@ -16,6 +16,7 @@ Process_Metric :: struct {
     memory_bytes, gpu_memory_bytes: u64,
     system_process, gpu_active: bool,
     gpu_memory_available: bool,
+    gpu_mask: u8, // Bit per Metrics.gpus slot; zero means membership is unknown.
 }
 
 // RSS is summed per PID; memory shared by group members can be counted twice.
@@ -25,6 +26,7 @@ Process_Group :: struct {
     cpu_percent: f32,
     gpu_active: bool,
     gpu_memory_available: bool,
+    gpu_mask: u8,
     memory_bytes, gpu_memory_bytes: u64,
     pid_head: int, // -1 terminates the linked PID list.
     pid_count: int,
@@ -62,7 +64,7 @@ Process_History :: struct {
     system_process: bool,
     role_generation: u64,
 }
-GPU_Process_Memory :: struct { pid: i32, memory: u64, available: bool }
+GPU_Process_Memory :: struct { pid: i32, memory: u64, available: bool, gpu_mask: u8 }
 NVML_Memory :: struct { total, free, used: u64 }
 NVML_Utilization :: struct { gpu, memory: u32 }
 NVML_Process :: struct { pid: u32, used_memory: u64, gpu_instance, compute_instance: u32 }
@@ -485,6 +487,7 @@ metrics_add_group_process :: proc(groups: []Process_Group, table: []i32, group_c
     group.gpu_memory_bytes += process.gpu_memory_bytes
     if process.system_process {group.system_processes+=1}
     group.gpu_active=group.gpu_active||process.gpu_active
+    group.gpu_mask |= process.gpu_mask
     group.pid_count += 1
     links[pid_count^] = PID_Group_Link{pid = process.pid, group = index, start = process.start}
     pid_count^ += 1
@@ -514,6 +517,7 @@ metrics_reduce_gpu_processes :: proc(processes: []GPU_Process_Memory, sum_memory
     count := 0
     for process in processes {
         if count > 0 && processes[count-1].pid == process.pid {
+            processes[count-1].gpu_mask |= process.gpu_mask
             if sum_memory {
                 processes[count-1].available = processes[count-1].available && process.available
                 processes[count-1].memory += process.memory
@@ -584,7 +588,7 @@ metrics_sample_gpu :: proc(m: ^Metrics) {
             if gp.pid == 0 { continue }
             available := gp.used_memory != ~u64(0)
             if !available { gp.used_memory = 0 }
-            per_gpu[per_gpu_count] = GPU_Process_Memory{pid = i32(gp.pid), memory = gp.used_memory, available = available}
+            per_gpu[per_gpu_count] = GPU_Process_Memory{pid = i32(gp.pid), memory = gp.used_memory, available = available, gpu_mask = u8(1)<<u32(i)}
             per_gpu_count += 1
         }
         per_gpu_count = metrics_reduce_gpu_processes(per_gpu[:per_gpu_count], sum_memory = false)
@@ -605,7 +609,7 @@ metrics_sample_gpu :: proc(m: ^Metrics) {
     m.gpu_total_processes = all_count
     gpu_pid_count := 0
     for gpu_process in all_processes[:all_count] {
-        process := Process_Metric{pid = gpu_process.pid, gpu_memory_bytes = gpu_process.memory, gpu_active=true, gpu_memory_available=gpu_process.available}
+        process := Process_Metric{pid = gpu_process.pid, gpu_memory_bytes = gpu_process.memory, gpu_active=true, gpu_memory_available=gpu_process.available, gpu_mask=gpu_process.gpu_mask}
         if group:=metrics_group_for_pid(m,process.pid);group!=nil {group.gpu_active=true}
         metrics_gpu_process_details(m, &process)
         metrics_groups_ensure(&m._gpu_groups,&m._gpu_group_table,m.gpu_total_groups,MAX_GPU_PIDS)

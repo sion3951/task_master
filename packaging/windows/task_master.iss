@@ -32,9 +32,11 @@ ArchitecturesAllowed={#AllowedArchitecture}
 ArchitecturesInstallIn64BitMode={#AllowedArchitecture}
 MinVersion=10.0.22000
 OutputBaseFilename=task_master-{#PackageVersion}-windows-{#PackageArchitecture}-setup
-Compression=lzma2
+Compression=lzma2/ultra64
+LZMAUseSeparateProcess=yes
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\..\assets\branding\task_master.ico
 UninstallDisplayIcon={app}\task_master.exe
 CloseApplications=yes
 RestartApplications=no
@@ -57,7 +59,7 @@ Source: "{#PayloadDirectory}\install-sensors.ps1"; DestDir: "{app}"; Flags: igno
 Source: "{#PayloadDirectory}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{commonprograms}\task_master"; Filename: "{app}\task_master.exe"; WorkingDir: "{app}"
+Name: "{commonprograms}\task_master"; Filename: "{app}\task_master.exe"; WorkingDir: "{app}"; IconFilename: "{app}\task_master.exe"; IconIndex: 0
 
 [Run]
 Filename: "{app}\task_master.exe"; Description: "Launch task_master"; Flags: nowait postinstall skipifsilent runasoriginaluser

@@ -7,8 +7,6 @@ import "core:sync"
 import "core:time"
 import "core:path/filepath"
 
-REMOTE_WINDOWS_SENSORS :: #load(#config(TASK_MASTER_WINDOWS_SENSORS,"assets/empty.bin"))
-
 Machine_Terminal_Job :: struct {
     process: os.Process,
     started: bool,
@@ -66,7 +64,6 @@ machine_terminal_open :: proc(a:^App,m:^Machine,install:bool=false) {
         {"sensors.plist",#load("sensors/macos/sensors.plist")},
         {"install-remote-windows.ps1",#load("scripts/install-remote-windows.ps1")},
         {"install-sensors.ps1",#load("scripts/install-sensors.ps1")},
-        {"sensors.zip",REMOTE_WINDOWS_SENSORS},
         {"collector-linux-amd64",remote_payload_linux_amd64},
         {"collector-linux-arm64",remote_payload_linux_arm64},
         {"collector-linux-riscv64",remote_payload_linux_riscv64},
@@ -96,8 +93,11 @@ machine_terminal_open :: proc(a:^App,m:^Machine,install:bool=false) {
     else {script=string(#load("scripts/remote-setup.sh"))}
     quote:=machine_shell_quote
     when ODIN_OS==.Windows {quote=machine_powershell_quote}
+    executable,executable_error:=os.get_executable_path(context.temp_allocator)
+    if executable_error!=nil {machine_error_set(a,"Could not locate task_master for remote helper preparation.");return}
     replacements:=[][2]string{
         {"@STAGE@",quote(directory)}, {"@HOST@",quote(string(m.host[:m.host_len]))},
+        {"@HELPER@",quote(executable)},
         {"@PORT@",fmt.tprintf("%d",m.port)}, {"@PROTOCOL@",fmt.tprintf("%d",REMOTE_PROTOCOL_VERSION)},
         {"@WINDOWS_PROBE@",quote(windows_probe)}, {"@WINDOWS_STAGE@",quote(windows_stage)},
         {"@WINDOWS_INSTALL@",quote(windows_install)}, {"@WINDOWS_VALIDATE@",quote(windows_validate)}, {"@WINDOWS_CLEANUP@",quote(windows_cleanup)},

@@ -31,5 +31,6 @@ $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut((Join-Path $env:ProgramData 'Microsoft/Windows/Start Menu/Programs/task_master.lnk'))
 $shortcut.TargetPath = Join-Path $destination 'task_master.exe'
 $shortcut.WorkingDirectory = $destination
+$shortcut.IconLocation = "$(Join-Path $destination 'task_master.exe'),0"
 $shortcut.Save()
 Write-Host 'task_master installed. Launch it normally from the Start menu; the desktop does not need administrator rights.'

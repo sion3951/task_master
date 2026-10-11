@@ -1,15 +1,14 @@
 #!/bin/sh
-# Build native Intel/Apple-silicon bundles; release mode retains every remote OS.
+# Build Intel/Apple-silicon bundles containing only their native collector.
 set -eu
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'USAGE'
 Usage: sh scripts/build-macos.sh [--arch native|amd64|arm64|all] [--collector-only]
-                               [--development] [--linux-dir DIR] [--windows-dir DIR]
-                               [--mac-dir DIR] [--version VERSION]
-Default: build both architectures and require all six SSH collector payloads.
+                               [--development] [--version VERSION]
+Default: build both architectures; each bundle embeds only its own collector.
 --collector-only builds the requested native macOS collector payloads only.
---development embeds the payloads currently available instead of requiring all six.
+--development is accepted for compatibility; all builds use local payloads only.
 Environment: ODIN, SIGN_IDENTITY (default ad-hoc).
  Graphics use the system AppKit, Metal, CoreText and CoreGraphics frameworks.
  No third-party graphics libraries or shader compiler are required.
@@ -19,16 +18,12 @@ USAGE
 }
 architectures='amd64 arm64'
 collector_only=false
-development=false
-linux_dir=build/collectors
-windows_dir=build/collectors
-mac_dir=
 version=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --help|-h) usage; exit 0 ;;
         --collector-only) collector_only=true; shift ;;
-        --development) development=true; shift ;;
+        --development) shift ;;
         --arch)
             [ "$#" -ge 2 ] || fail '--arch needs a value'
             case "$2" in
@@ -38,9 +33,8 @@ while [ "$#" -gt 0 ]; do
                 *) fail "Unsupported architecture: $2" ;;
             esac
             shift 2 ;;
-        --linux-dir) [ "$#" -ge 2 ] || fail '--linux-dir needs a directory'; linux_dir=$2; shift 2 ;;
-        --windows-dir) [ "$#" -ge 2 ] || fail '--windows-dir needs a directory'; windows_dir=$2; shift 2 ;;
-        --mac-dir) [ "$#" -ge 2 ] || fail '--mac-dir needs a directory'; mac_dir=$2; shift 2 ;;
+        # Accepted for existing build callers; foreign payloads are never imported.
+        --linux-dir|--windows-dir|--mac-dir) [ "$#" -ge 2 ] || fail "$1 needs a directory"; shift 2 ;;
         --version) [ "$#" -ge 2 ] || fail '--version needs a value'; version=$2; shift 2 ;;
         *) fail "Unknown argument: $1" ;;
     esac
@@ -82,11 +76,6 @@ if not match:
 print(match[1])
 PY
 )
-if ! $development; then
-    set -- --all --linux-dir "$linux_dir" --windows-dir "$windows_dir"
-    [ -z "$mac_dir" ] || set -- "$@" --mac-dir "$mac_dir"
-    sh scripts/build-collectors.sh "$@"
-fi
 for target_arch in $architectures; do
     case "$target_arch" in
         amd64) apple_arch=x86_64 ;;
@@ -99,18 +88,8 @@ for target_arch in $architectures; do
         "-out:$bundle/Contents/MacOS/task_master" -o:speed -no-bounds-check -vet \
         -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 \
         "-define:TASK_MASTER_VERSION=$version"
-    for payload_os in linux windows darwin; do
-        for payload_arch in amd64 arm64; do
-            payload=build/task_master-collector-$payload_os-$payload_arch
-            if [ -s "$payload" ]; then
-                define=$(printf 'TASK_MASTER_COLLECTOR_%s_%s' "$payload_os" "$payload_arch" | tr '[:lower:]' '[:upper:]')
-                set -- "$@" "-define:$define=$payload"
-            elif ! $development; then fail "Missing release collector: $payload"; fi
-        done
-    done
-    if [ -s build/task_master-windows-sensors.zip ]; then
-        set -- "$@" -define:TASK_MASTER_WINDOWS_SENSORS=build/task_master-windows-sensors.zip
-    elif ! $development; then fail 'Missing task_master-windows-sensors.zip for remote sensor installation.'; fi
+    define=$(printf 'TASK_MASTER_COLLECTOR_DARWIN_%s' "$target_arch" | tr '[:lower:]' '[:upper:]')
+    set -- "$@" "-define:$define=build/task_master-collector-darwin-$target_arch"
     "$@"
     cp "build/task_master-collector-darwin-$target_arch" "$bundle/Contents/MacOS/task_master-collector"
     # Native Apple frameworks are supplied by macOS. Reject accidental external

@@ -465,7 +465,10 @@ windows_gpu_processes :: proc(m:^Metrics,output:[]GPU_Process_Memory)->int {
             memory+=entry.shared
             available=entry.shared_available&&(entry.dedicated_available||w.gpu_adapters[entry.slot].dedicated==0)
         }
-        output[count]={pid=entry.pid,memory=memory,available=available};count+=1
+        // Unmapped adapters retain membership as unknown rather than dimming
+        // a process that may belong to the selected GPU.
+        mask:=u8(1)<<u32(entry.slot) if entry.slot>=0 else ~u8(0)
+        output[count]={pid=entry.pid,memory=memory,available=available,gpu_mask=mask};count+=1
     }
     // Shared/dedicated and duplicate engine instances have already been joined.
     // The caller reduces once across physical adapters and replaces NVML lists.

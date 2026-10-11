@@ -835,6 +835,11 @@ cursor_callback :: proc "c" (window:glfw.WindowHandle,x,y:f64) {
 }
 main :: proc() {
     platform_process_init()
+    if len(os.args)>1&&os.args[1]=="--prepare-remote-helpers" {
+        if len(os.args)!=5 {fmt.eprintln("Usage: task_master --prepare-remote-helpers linux|darwin|windows amd64|arm64|riscv64 PRIVATE_STAGE");os.exit(1)}
+        if !remote_helper_prepare(os.args[2],os.args[3],os.args[4]) {os.exit(1)}
+        return
+    }
     for arg in os.args[1:] {
         if arg=="--version" {fmt.println(strings.trim_space(UPDATER_VERSION));return}
         if arg=="--check-updates" {updater_cli_check();return}

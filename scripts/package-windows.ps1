@@ -54,8 +54,10 @@ try {
             throw "Executable architecture does not match $Architecture package: $name"
         }
     }
-    # Standalone packaging also prepares and verifies the offline driver payload.
-    & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory (Join-Path $source 'sensors') -PrepareDriverOnly
+    # Only Intel/AMD hosts use PawnIO; ARM64 setup skips the unsupported driver.
+    if ($Architecture -eq 'x64') {
+        & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory (Join-Path $source 'sensors') -PrepareDriverOnly
+    }
     $output = [IO.Path]::GetFullPath($OutputDirectory)
     New-Item -ItemType Directory -Force -Path $output | Out-Null
     $setup = Join-Path $output "task_master-$Version-windows-$Architecture-setup.exe"

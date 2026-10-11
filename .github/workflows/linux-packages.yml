@@ -95,14 +95,13 @@ jobs:
           Enter-VsDevShell -VsInstallPath $visualStudio -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
           & scripts/build-windows.ps1 -CollectorOnly
           if ($LASTEXITCODE -ne 0) { throw 'Windows collector build failed.' }
-          New-Item -ItemType Directory -Force -Path build/collectors | Out-Null
-          # build-windows.ps1 exports both native collectors and the dual-runtime sensor archive.
+          # Exports both collectors and separate sensor runtimes for signed remote downloads.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: collector-windows
           path: |
             build/collectors/task_master-collector-windows-*
-            build/collectors/task_master-windows-sensors.zip
+            build/collectors/task_master-windows-sensors-*.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -129,7 +128,7 @@ jobs:
     name: AppImage and Debian package (${{ matrix.arch }})
     env:
       PACKAGE_VERSION: ${{ needs.version.outputs.package }}
-    needs: [version, linux-collectors, windows-collector, macos-collectors]
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -150,15 +149,8 @@ jobs:
         run: sh scripts/ci/setup-linux.sh
       - name: Install pinned Odin
         run: sh scripts/ci/setup-odin.sh
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: collector-*
-          merge-multiple: true
-          path: build/collectors
-      - name: Build release with all six remote payloads
-        run: |
-          chmod 755 build/collectors/task_master-collector-*
-          make release COLLECTOR_ARGS='--linux-dir build/collectors --windows-dir build/collectors --mac-dir build/collectors'
+      - name: Build release with native payloads only
+        run: make release
       - name: Package AppImage and Debian archive
         run: |
           sh scripts/build-appimage.sh --version "$PACKAGE_VERSION" --output-dir build/packages --build-dir build
@@ -178,7 +170,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x64, arm64]
-    needs: [version, linux-collectors, windows-collector, macos-collectors]
+    needs: version
     runs-on: windows-2022
     env:
       PACKAGE_VERSION: ${{ needs.version.outputs.package }}
@@ -190,11 +182,6 @@ jobs:
       - name: Build pinned Odin with Windows ARM64 support
         shell: pwsh
         run: scripts/ci/setup-odin-windows.ps1
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: collector-*
-          merge-multiple: true
-          path: build/collectors
       - name: Build desktop, sensors and setup executable
         shell: pwsh
         run: |
@@ -214,7 +201,7 @@ jobs:
 
   macos-package:
     name: macOS installer packages (Intel and Apple Silicon)
-    needs: [version, linux-collectors, windows-collector, macos-collectors]
+    needs: version
     runs-on: macos-15
     env:
       PACKAGE_VERSION: ${{ needs.version.outputs.package }}
@@ -224,11 +211,6 @@ jobs:
         run: sh scripts/ci/setup-odin.sh
       - name: Verify Apple SDK tools for native Metal/AppKit builds
         run: sh scripts/ci/setup-macos.sh
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: collector-*
-          merge-multiple: true
-          path: build/collectors
       - name: Build both desktop and installer architectures
         run: sh scripts/build-macos.sh --arch all --version "$PACKAGE_VERSION"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -241,7 +223,7 @@ jobs:
   release:
     name: Sign updater manifest and publish complete tagged release
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [packages, windows-package, macos-package]
+    needs: [packages, windows-package, macos-package, linux-collectors, windows-collector, macos-collectors]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -250,6 +232,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: "*-packages*"
+          merge-multiple: true
+          path: packages
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: collector-*
           merge-multiple: true
           path: packages
       - name: Sign update manifest with the pinned release key
@@ -275,7 +262,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           cd packages
-          sha256sum *.AppImage *.deb *.exe *.pkg > SHA256SUMS
+          sha256sum *.AppImage *.deb *.exe *.pkg task_master-collector-* task_master-windows-sensors-*.zip > SHA256SUMS
           version=${RELEASE_TAG#v}
           numeric_version=${version%%+*}
           prerelease=false
@@ -293,7 +280,7 @@ jobs:
               gh release create "$RELEASE_TAG" --draft --prerelease="$prerelease" --verify-tag --generate-notes --title "task_master $RELEASE_TAG"
             fi
           fi
-          gh release upload "$RELEASE_TAG" --clobber *.AppImage *.deb *.exe *.pkg SHA256SUMS update.json update.json.sig
+          gh release upload "$RELEASE_TAG" --clobber *.AppImage *.deb *.exe *.pkg task_master-collector-* task_master-windows-sensors-*.zip SHA256SUMS update.json update.json.sig
           if [ "$prerelease" = true ]; then
             gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
           else

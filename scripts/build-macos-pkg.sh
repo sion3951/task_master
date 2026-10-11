@@ -80,6 +80,7 @@ path.write_bytes(plistlib.dumps(components))
 PY
 pkgbuild --root "$stage/root" --component-plist "$stage/components.plist" \
     --scripts "$stage/scripts" --identifier dev.task-master.desktop \
+    --compression latest --min-os-version 13.0 \
     --version "$numeric_version" --install-location / "$stage/task_master.pkg"
 python3 - "$stage/Distribution.xml" "$apple_arch" "$numeric_version" <<'PY'
 import pathlib, sys, xml.etree.ElementTree as ET

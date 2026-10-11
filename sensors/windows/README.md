@@ -21,15 +21,25 @@ dotnet publish sensors/windows/task_master.Sensors.csproj -c Release -r win-x64 
 dotnet publish sensors/windows/task_master.Sensors.csproj -c Release -r win-arm64 --self-contained true -p:RestoreLockedMode=true -o build/windows-arm64/sensors
 ```
 
+Publishing removes unused .NET assemblies using `TrimMode=copyused`. It retains
+every member of assemblies that remain, and explicitly keeps the complete
+hardware libraries and Event Log message resources. Built-in COM stays enabled
+for WMI. Do not change this to member-level trimming: hardware discovery and
+AMD GPU PCI identity use reflection. Debugger support and build symbols are
+excluded; `--diagnose` remains available. The linker version is pinned alongside
+the package lock file so SDK patch updates do not change locked restores.
+
 Then, from an administrator PowerShell:
 
 ```powershell
 ./scripts/install-sensors.ps1
 ```
 
-Complete Windows builds bundle the unchanged official PawnIO installer for
-offline setup, including remote Install / fix. A standalone helper without the
-bundled installer downloads it when needed. Driver upgrades reuse one verified
+Windows x64 builds bundle the unchanged official PawnIO installer for offline
+local setup. ARM64 builds omit this unsupported driver. Remote Install / fix
+downloads the matching sensor archive on first use and caches it for reuse;
+the x64 archive includes PawnIO. A standalone x64 helper without the bundled
+installer downloads it when needed. Driver upgrades reuse one verified
 download. Sensor runtime staging uses parallel copies and retains private ACLs,
 service rollback and bounded start/stop waits. Setup logs record stage timings.
 
@@ -74,5 +84,8 @@ without attempting emulated CPUID or inventing a package-power value.
 and exits. Driver access for that command may require administrator rights.
 Normal operation uses only the installed service's snapshot pipe.
 
-The remote sensor archive includes `x64/` and `arm64/` self-contained runtimes.
-`install-sensors.ps1` selects the host architecture before staging its service.
+Remote sensor archives are `task_master-windows-sensors-amd64.zip` and
+`task_master-windows-sensors-arm64.zip`. Each contains only its own architecture's
+self-contained runtime at the archive root; the amd64 archive also includes the
+official PawnIO installer. `install-sensors.ps1` checks the runtime against the
+host architecture before staging its service.

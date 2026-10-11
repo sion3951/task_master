@@ -424,6 +424,20 @@ renderer_swapchain :: proc(r: ^Renderer) -> bool {
     }
     return true
 }
+when ODIN_OS == .Windows {
+    renderer_set_window_icon :: proc(window: glfw.WindowHandle) {
+        // GLFW copies the pixels and sets both the taskbar and title-bar icons.
+        // Embed the logo so launches do not depend on the working directory.
+        logo := #load("assets/branding/task_master-logo.png")
+        width, height, channels: c.int
+        pixels := stbi.load_from_memory(raw_data(logo), c.int(len(logo)), &width, &height, &channels, 4)
+        if pixels == nil { fmt.eprintln("Cannot decode the Windows app icon"); return }
+        defer stbi.image_free(pixels)
+        icons := [1]glfw.Image{{width=width, height=height, pixels=pixels}}
+        glfw.SetWindowIcon(window, icons[:])
+    }
+}
+
 renderer_init :: proc(r: ^Renderer, width,height: int, title: cstring) -> bool {
     stage:=time.tick_now()
     if !glfw.Init() { fmt.eprintln("Cannot initialize GLFW"); renderer_destroy(r); return false }
@@ -437,6 +451,7 @@ renderer_init :: proc(r: ^Renderer, width,height: int, title: cstring) -> bool {
     glfw.WindowHint(glfw.VISIBLE,glfw.GetPlatform() == glfw.PLATFORM_WAYLAND)
     r.window=glfw.CreateWindow(i32(width),i32(height),title,nil,nil)
     if r.window == nil { renderer_destroy(r); return false }
+    when ODIN_OS == .Windows { renderer_set_window_icon(r.window) }
     r.width=width; r.height=height
     scale_x,scale_y := glfw.GetWindowContentScale(r.window)
     atlas:=Font_Atlas{scale=clamp(max(scale_x,scale_y),0.5,4.0)}

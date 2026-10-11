@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build or combine the collector payloads embedded in desktop release builds.
+# Build or combine separately published remote collector assets.
 set -eu
 
 usage() {
@@ -14,6 +14,7 @@ Prebuilt directories accept task_master-collector-linux-{amd64,arm64} and
  task_master-collector-windows-{amd64,arm64}[.exe]. Windows directories can also
  provide task_master-collector.exe for x64. ARM64 payloads must be native;
  use the patched Windows ARM64 Odin compiler for cross-builds.
+ Windows sensor archives are separate task_master-windows-sensors-{amd64,arm64}.zip files.
 
 Environment:
  ODIN                       Odin compiler executable (default: odin)
@@ -71,9 +72,12 @@ esac
 [ -z "$mac_dir" ] || [ -d "$mac_dir" ] || fail "No macOS artifact directory: $mac_dir"
 
 mkdir -p build
-if [ -n "$windows_dir" ] && [ -s "$windows_dir/task_master-windows-sensors.zip" ]; then
-    cp "$windows_dir/task_master-windows-sensors.zip" build/task_master-windows-sensors.zip
-fi
+for sensor_arch in amd64 arm64; do
+    sensor=task_master-windows-sensors-$sensor_arch.zip
+    if [ -n "$windows_dir" ] && [ -s "$windows_dir/$sensor" ]; then
+        cp "$windows_dir/$sensor" "build/$sensor"
+    fi
+done
 stage=$(mktemp -d build/collector-cross.XXXXXX)
 trap 'rm -rf "$stage"' EXIT
 trap 'exit 129' HUP
@@ -240,8 +244,11 @@ elif $strict; then
 fi
 
 missing=
-if $strict && [ ! -s build/task_master-windows-sensors.zip ]; then
-    fail 'A complete release needs task_master-windows-sensors.zip from the Windows build for remote sensor installation.'
+if $strict; then
+    for sensor_arch in amd64 arm64; do
+        [ -s "build/task_master-windows-sensors-$sensor_arch.zip" ] || \
+            fail "Remote release assets need task_master-windows-sensors-$sensor_arch.zip from the Windows collector-only build."
+    done
 fi
 for payload in build/task_master-collector-linux-amd64 build/task_master-collector-linux-arm64 \
                "$windows_amd64" "$windows_arm64" build/task_master-collector-darwin-amd64 build/task_master-collector-darwin-arm64; do

@@ -9,7 +9,7 @@ platform_process_init :: proc() {
     // A GUI subsystem executable opens no console for ordinary launches. Attach
     // for CLI diagnostics without replacing redirected output/pipeline handles.
     cli:=false
-    for arg in os.args[1:] {if arg=="--stats"||arg=="--help"||arg=="--smoke"||arg=="--startup-profile"||strings.has_prefix(arg,"--persistence=")||strings.has_prefix(arg,"--capture=") {cli=true}}
+    for arg in os.args[1:] {if arg=="--stats"||arg=="--help"||arg=="--smoke"||arg=="--startup-profile"||arg=="--prepare-remote-helpers"||strings.has_prefix(arg,"--persistence=")||strings.has_prefix(arg,"--capture=") {cli=true}}
     if !cli {return}
     output,errors:=win32.GetStdHandle(win32.STD_OUTPUT_HANDLE),win32.GetStdHandle(win32.STD_ERROR_HANDLE)
     output_valid:=output!=nil&&output!=win32.INVALID_HANDLE_VALUE&&win32.GetFileType(output)!=0

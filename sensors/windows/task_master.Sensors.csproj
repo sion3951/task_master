@@ -8,9 +8,37 @@
     <Nullable>enable</Nullable>
     <AssemblyName>task_master.Sensors</AssemblyName>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <PublishTrimmed>false</PublishTrimmed>
+    <!-- Remove unused assemblies, never individual members: hardware backends
+         use reflection (including AMD PCI identity) and WMI/COM interop. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>copyused</TrimMode>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <DebuggerSupport>false</DebuggerSupport>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Keep the implicit linker dependency consistent with the lock file
+         across SDK patch versions on Windows builders. -->
+    <KnownILLinkPack Update="Microsoft.NET.ILLink.Tasks">
+      <ILLinkPackVersion Condition="'%(KnownILLinkPack.TargetFramework)' == 'net8.0'">8.0.31</ILLinkPackVersion>
+    </KnownILLinkPack>
+    <!-- Keep the complete helper and hardware libraries, even if a backend is
+         reached only on another machine. Assembly-only trimming also retains
+         every member of the framework assemblies these libraries reference. -->
+    <TrimmerRootAssembly Include="task_master.Sensors" />
+    <TrimmerRootAssembly Include="LibreHardwareMonitorLib" />
+    <TrimmerRootAssembly Include="System.Management" />
+    <TrimmerRootAssembly Include="HidSharp" />
+    <TrimmerRootAssembly Include="DiskInfoToolkit" />
+    <TrimmerRootAssembly Include="BlackSharp.Core" />
+    <TrimmerRootAssembly Include="RAMSPDToolkit-NDD" />
+    <TrimmerRootAssembly Include="System.CodeDom" />
+    <TrimmerRootAssembly Include="System.ServiceProcess.ServiceController" />
+    <TrimmerRootAssembly Include="System.Diagnostics.EventLog" />
+    <TrimmerRootAssembly Include="System.Diagnostics.EventLog.Messages" />
+    <TrimmerRootAssembly Include="System.IO.Ports" />
+    <TrimmerRootAssembly Include="System.Threading.AccessControl" />
     <PackageReference Include="LibreHardwareMonitorLib" Version="[0.9.6]" />
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="[8.0.1]" />
     <None Include="THIRD-PARTY-NOTICES.md" CopyToPublishDirectory="PreserveNewest" />

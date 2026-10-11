@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and Ed25519-sign a GitHub release's desktop update manifest."""
+"""Build and Ed25519-sign a GitHub release's installer and remote helper manifest."""
 
 import argparse
 import hashlib
@@ -47,11 +47,20 @@ def build_manifest(args):
         ("darwin", "amd64", "macos", f"task_master-{version}-amd64.pkg"),
         ("darwin", "arm64", "macos", f"task_master-{version}-arm64.pkg"),
     ]
+    targets.extend(
+        (os_name, arch, "collector", f"task_master-collector-{os_name}-{arch}")
+        for os_name in ("linux", "darwin", "windows")
+        for arch in ("amd64", "arm64")
+    )
+    targets.extend(
+        ("windows", arch, "sensors", f"task_master-windows-sensors-{arch}.zip")
+        for arch in ("amd64", "arm64")
+    )
     assets = []
     for os_name, arch, kind, name in targets:
         package = packages / name
         if not package.is_file() or package.stat().st_size == 0:
-            raise ValueError(f"Missing or empty release installer: {package}")
+            raise ValueError(f"Missing or empty release asset: {package}")
         digest = hashlib.sha256()
         with package.open("rb") as handle:
             for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
@@ -98,7 +107,7 @@ def main():
                     "-inkey", staged_public, "-in", staged_manifest, "-sigfile", staged_signature)
         (args.packages / "update.json").write_bytes(payload)
         (args.packages / "update.json.sig").write_bytes(signature)
-        print(f"Signed updater manifest for {manifest['version']} ({len(manifest['assets'])} installers).")
+        print(f"Signed updater manifest for {manifest['version']} ({len(manifest['assets'])} assets).")
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         # Never echo command output: key-handling diagnostics may contain secrets.
         parser.exit(1, f"Cannot publish updater manifest: {error}\n")

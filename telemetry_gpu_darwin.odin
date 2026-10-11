@@ -308,7 +308,7 @@ metrics_darwin_sample_gpus :: proc(m:^Metrics,processes:[]GPU_Process_Memory)->i
                     surface:=gpu_cf_array_value(surfaces,index)
                     value,ok:=darwin_gpu_number(surface,"pid")
                     if ok&&value>0&&value<=0x7fffffff {
-                        if count<len(processes) {processes[count]=GPU_Process_Memory{pid=i32(value),available=false};count+=1}else {m.process_group_overflow=true}
+                        if count<len(processes) {processes[count]=GPU_Process_Memory{pid=i32(value),available=false,gpu_mask=u8(1)<<u32(i)};count+=1}else {m.process_group_overflow=true}
                     }
                 }
             }
@@ -327,7 +327,7 @@ metrics_darwin_sample_gpus :: proc(m:^Metrics,processes:[]GPU_Process_Memory)->i
                         // Membership comes from the GPU's own clients. Darwin
                         // exposes no reliable per-process resident VRAM byte
                         // counter: retain the process and mark bytes unknown.
-                        if pid>0 {if count<len(processes) {processes[count]=GPU_Process_Memory{pid=pid,available=false};count+=1}else {m.process_group_overflow=true}}
+                        if pid>0 {if count<len(processes) {processes[count]=GPU_Process_Memory{pid=pid,available=false,gpu_mask=u8(1)<<u32(i)};count+=1}else {m.process_group_overflow=true}}
                     }
                 }
             }

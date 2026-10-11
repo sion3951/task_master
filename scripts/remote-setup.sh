@@ -6,6 +6,7 @@ host=@HOST@
 port=@PORT@
 install_requested=@INSTALL@
 protocol=@PROTOCOL@
+helper=@HELPER@
 step=Starting
 progress() {
     step=$1
@@ -107,8 +108,12 @@ case "$architecture" in
     *) echo "Unsupported architecture: $architecture" >&2; exit 1 ;;
 esac
 payload=$stage/collector-$system-$architecture
-[ -s "$payload" ] || { echo "This build has no $system $architecture collector. Use a complete release build." >&2; exit 1; }
-echo "Detected $system $architecture; bundled collector uses protocol $protocol."
+echo "Detected $system $architecture; collector uses protocol $protocol."
+if [ ! -s "$payload" ] || { $remote_windows && [ ! -s "$stage/sensors.zip" ]; }; then
+    progress 'Step 3/6: Prepare verified remote helpers (download or cache)'
+    "$helper" --prepare-remote-helpers "$system" "$architecture" "$stage"
+fi
+[ -s "$payload" ] || { echo "Could not prepare the $system $architecture collector." >&2; exit 1; }
 progress 'Step 4/6: Transfer and collector compatibility'
 scp_host=$host
 case "$host" in

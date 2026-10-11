@@ -6,16 +6,33 @@ installed release does not offer itself as an update. Prerelease tags remain
 prereleases and are excluded from the stable update channel.
 
 Every update release includes `update.json` and `update.json.sig`, alongside
-the installers. The manifest lists the version, download URL, byte size and
-SHA-256 of each supported installer. Its raw UTF-8 bytes are signed with
-Ed25519; `update.json.sig` contains the raw 64-byte signature. The app verifies
+the installers and remote helpers. The manifest lists the version, download
+URL, byte size and SHA-256 of each supported asset, with its OS, architecture
+and kind (`collector`, `sensors`, or installer format). Its raw UTF-8 bytes are
+signed with Ed25519; `update.json.sig` contains the raw 64-byte signature. The app verifies
 that signature against the public key embedded from
 `assets/update-public-key.hex` before trusting the manifest, then verifies the
 downloaded installer against its signed size and SHA-256.
 
 The supported release assets are Debian and AppImage packages for Linux x64
 and ARM64, macOS installer packages for Intel and Apple Silicon, and the
-Windows x64 installer (also used through Windows 11 ARM64 emulation).
+native Windows x64 and ARM64 installers.
+
+Each installer contains only the payloads for its own OS and architecture.
+Remote Install / fix fetches missing collectors and Windows sensor runtimes
+from the signed manifest for the installed desktop's exact release version.
+Downloaded helpers are checked against the signed size and SHA-256, and
+cached for reuse. The first use of an uncached helper needs internet access;
+matching cached helpers can be used offline. A development build needs a
+published matching release before it can download remote helpers.
+
+Collector release assets use `task_master-collector-<os>-<arch>`, with `os`
+`linux`, `darwin`, or `windows`, and `arch` `amd64` or `arm64`. Windows sensor
+assets are `task_master-windows-sensors-amd64.zip` and
+`task_master-windows-sensors-arm64.zip`; each contains just its native runtime
+at the archive root. Only the amd64 archive includes the pinned official PawnIO
+driver installer. These names are stable inside each versioned GitHub release
+directory.
 
 The header's **Updates** button opens the update dialog, showing the installed
 version and current status. **Automatic downloads** is enabled by default;
@@ -65,9 +82,10 @@ gh secret set TASK_MASTER_UPDATE_PRIVATE_KEY < .update-signing/private.pem
 ```
 
 The release workflow fails if the secret is absent or if its public key does
-not match the checked-in public key. All seven installers must be present
-before the workflow signs the manifest. It creates or resumes a draft, uploads
-all installers, checksums and signed metadata, then publishes the release.
+not match the checked-in public key. All eight installers, six collectors
+and two sensor archives must be present before the workflow signs the manifest. It creates or resumes a draft, uploads
+all installers, helpers, checksums and signed metadata, then publishes the
+release.
 An upload failure leaves the release as a draft, so clients cannot discover
 an incomplete update. A retry can resume that draft; an already published
 release is never overwritten by the workflow. Stable tags become the latest
@@ -78,7 +96,7 @@ Tagged updater releases use SemVer, for example `v1.2.3` or
 CI embeds the version resolved for its package build. For a local Linux build
 of a different version, use `make release PACKAGE_VERSION=1.2.3`.
 
-To sign an already built set of release installers locally:
+To sign an already built set of release installers and helpers locally:
 
 ```sh
 python3 scripts/update-manifest.py --tag v1.2.3 --packages build/packages \
@@ -86,7 +104,8 @@ python3 scripts/update-manifest.py --tag v1.2.3 --packages build/packages \
 ```
 
 This command verifies the signing key, verifies its generated signature, and
-writes both metadata assets only after the complete package set is validated.
+writes both metadata assets only after the complete installer and helper set
+is validated.
 
 ## Key rotation
 

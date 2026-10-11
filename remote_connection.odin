@@ -105,6 +105,9 @@ remote_failure_status :: proc(message:string)->Connection_Status {
     for hint in ([]string{"permission denied", "authentication failed", "host key verification failed", "remote host identification has changed", "no matching host key type", "no matching key exchange method", "offending", "no compatible installed collector", "unsupported or invalid telemetry", "collector does not match", "collector platform changed", "not found", "no such file", "not recognized", "cannot find", "command execution", "requires correction"}) {
         if strings.contains(text,hint) {return .Setup_Required}
     }
+    for hint in ([]string{"release does not support", "no valid exact release version", "exact release has no published helper", "remote helper metadata signature", "signed remote helper manifest", "signed remote helper asset metadata", "remote helper checksum verification failed", "remote helper cache bytes did not match"}) {
+        if strings.contains(text,hint) {return .Setup_Required}
+    }
     return .Disconnected
 }
 
@@ -277,7 +280,7 @@ remote_error_append :: proc(buffer: []u8, used: ^int, data: []u8) {
     used^ += copy(buffer[used^:], data)
 }
 
-remote_connection_session :: proc(c: ^Remote_Connection, command: string, frame: ^[dynamic]u8, scratch: ^^Metrics, binary:[]u8=nil, negotiated_bootstrap:bool=false) -> (live: bool) {
+remote_connection_session :: proc(c: ^Remote_Connection, command: string, frame: ^[dynamic]u8, scratch: ^^Metrics, binary:[]u8=nil, negotiated_bootstrap:bool=false, needs_helper:^bool=nil) -> (live: bool) {
     s, err := remote_ssh_start(c.host, command,c.port)
     if err != nil {
         remote_connection_status(c, .Disconnected, fmt.tprintf("Unable to start SSH: %v", err))
@@ -483,6 +486,10 @@ remote_connection_session :: proc(c: ^Remote_Connection, command: string, frame:
         diagnostic := strings.trim_space(string(error_buffer[:error_used]))
         if len(diagnostic) > 0 { failure=diagnostic }
         else if len(frame^) > 0 && failure == "SSH connection closed" { failure="Remote collector stopped during a telemetry frame" }
+        if needs_helper!=nil&&!live&&strings.contains(failure,"No compatible installed collector or embedded payload") {
+            needs_helper^=true
+            return false
+        }
         remote_connection_failed(c, failure)
     }
     return live
@@ -520,7 +527,28 @@ remote_connection_worker :: proc(c: ^Remote_Connection) {
                 command=remote_collector_bootstrap_command(platform,architecture,len(binary),telemetry=true)
             } else if platform==.Windows {command=remote_windows_collector_command(c.collector)}
             else {command=remote_collector_command(c.collector)}
-            if command!="" {was_live=remote_connection_session(c,command,&frame,&scratch,binary,negotiated_bootstrap=bootstrap);delete(command)}
+            if command!="" {
+                // First let the remote use a compatible installed collector.
+                // A missing foreign payload must not introduce an Internet
+                // requirement for already-installed or offline remote hosts.
+                needs_helper:=false
+                was_live=remote_connection_session(c,command,&frame,&scratch,binary,negotiated_bootstrap=bootstrap,needs_helper=&needs_helper if bootstrap&&len(binary)==0 else nil)
+                delete(command)
+                if needs_helper&&!sync.atomic_load(&c.stop)&&!sync.atomic_load(&c.retry_requested) {
+                    sync.mutex_lock(&c.mutex)
+                    architecture=strings.clone(string(c.architecture[:c.architecture_len]),context.temp_allocator)
+                    sync.mutex_unlock(&c.mutex)
+                    remote_connection_status(c,.Connecting,"Downloading and verifying the matching remote collector")
+                    error:string
+                    binary,error=remote_helper_collector(platform,architecture,&c.stop)
+                    if error!="" {remote_connection_failed(c,error)}
+                    else {
+                        command=remote_collector_bootstrap_command(platform,architecture,len(binary),telemetry=true)
+                        if command!="" {was_live=remote_connection_session(c,command,&frame,&scratch,binary,negotiated_bootstrap=true);delete(command)}
+                        delete(binary)
+                    }
+                }
+            }
         }
         free_all(context.temp_allocator)
         if sync.atomic_load(&c.stop) { break }

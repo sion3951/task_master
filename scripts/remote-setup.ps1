@@ -4,6 +4,7 @@ $sshHost = @HOST@
 $port = @PORT@
 $installRequested = @INSTALL@
 $protocol = @PROTOCOL@
+$helper = @HELPER@
 $step = 'Starting'
 function Show-Progress([string] $Message) {
     $script:step = $Message
@@ -65,8 +66,13 @@ try {
             default { throw "Unsupported architecture: $architecture" }
         }
         $payload = Join-Path $stage "collector-$system-$architecture"
-        if (-not (Test-Path -LiteralPath $payload)) { throw "This build has no $system $architecture collector. Use a complete release build." }
-        Write-Host "Detected $system $architecture; bundled collector uses protocol $protocol."
+        Write-Host "Detected $system $architecture; collector uses protocol $protocol."
+        if (-not (Test-Path -LiteralPath $payload) -or ($remoteWindows -and -not (Test-Path -LiteralPath (Join-Path $stage 'sensors.zip')))) {
+            Show-Progress 'Step 3/6: Prepare verified remote helpers (download or cache)'
+            & $helper --prepare-remote-helpers $system $architecture $stage | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'Could not prepare verified remote helpers. Connect to the internet or use a previously cached helper, then retry.' }
+        }
+        if (-not (Test-Path -LiteralPath $payload)) { throw "Could not prepare the $system $architecture collector." }
         Show-Progress 'Step 4/6: Transfer and collector compatibility'
         $scpHost = $sshHost
         if ($scpHost.Contains(':') -and -not $scpHost.Contains('[')) {

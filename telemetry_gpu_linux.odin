@@ -545,6 +545,7 @@ metrics_linux_sample_gpus :: proc(m: ^Metrics, output: []GPU_Process_Memory) -> 
                     if len(text) == len(info_buffer) { m.process_group_overflow = true; continue }
                     memory, available, include := linux_gpu_fdinfo(m, sampler, device_index, process.pid, descriptor, text, elapsed_ns)
                     if include {
+                        process.gpu_mask |= u8(1)<<u32(sampler.devices[device_index].slot)
                         process.available = available if !process_seen else process.available && available
                         process_seen = true
                         process.memory += memory

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=Inter:wght@400;500&family=Source+Sans+3:wght@400;500&display=block">
+<style>
+body{margin:0;background:transparent;color:var(--foreground);font-family:var(--font-sans,system-ui)}
+*{box-sizing:border-box}
+.option{margin-bottom:20px}
+.caption{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:8px;font-size:14px}
+.caption a{color:inherit;font-weight:500;text-underline-offset:3px}
+.caption span{color:var(--muted-foreground);font-size:12px}
+.sample{background:#080808;color:#e9e9e9;padding:18px;border-radius:var(--radius,8px);font-size:14px;line-height:1.5}
+.plex{font-family:'IBM Plex Sans',sans-serif}.inter{font-family:Inter,sans-serif}.source{font-family:'Source Sans 3',sans-serif}
+.navigation{display:flex;gap:22px;color:#a4a4a4;margin-bottom:16px;flex-wrap:wrap;font-size:13px}
+.navigation .active{color:#e9e9e9}
+.content{display:grid;grid-template-columns:1fr 1.3fr;gap:24px}
+.label{color:#a4a4a4;font-size:12px}
+.value{font-size:30px;font-weight:400;font-variant-numeric:tabular-nums;margin:2px 0}
+.detail{font-size:12px;color:#a4a4a4}
+table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+th{font-weight:400;color:#a4a4a4;font-size:12px;text-align:left;padding-bottom:7px}
+td{padding:3px 0}td:last-child,th:last-child{text-align:right}
+.characters{font-size:12px;color:#a4a4a4;margin-top:13px;letter-spacing:.04em}
+@media(max-width:460px){.content{grid-template-columns:1fr;gap:14px}.navigation{gap:15px}.sample{padding:16px}}
+</style>
+</head>
+<body>
+<div id="font-options">
+<section class="option" aria-label="IBM Plex Sans sample">
+<div class="caption"><a href="https://www.ibm.com/design/language/typography/typeface/" target="_blank" rel="noopener">IBM Plex Sans</a><span>My pick · technical, distinctive</span></div>
+<div class="sample plex"><div class="navigation"><span>Overview</span><span class="active">CPU</span><span>Memory</span><span>Processes</span></div><div class="content"><div><div class="label">CPU utilization</div><div class="value">24.8%</div><div class="detail">3.72 GHz · 68.4 W · 52 °C</div></div><table><thead><tr><th>Process</th><th>CPU</th></tr></thead><tbody><tr><td>task_master</td><td>1.8%</td></tr><tr><td>firefox</td><td>12.4%</td></tr><tr><td>collector</td><td>0.3%</td></tr></tbody></table></div><div class="characters">0123456789 &nbsp; Il1 O0 &nbsp; PID 18402 &nbsp; 16.8 GiB / 64.0 GiB</div></div>
+</section>
+<section class="option" aria-label="Inter sample">
+<div class="caption"><a href="https://rsms.me/inter/" target="_blank" rel="noopener">Inter</a><span>Cleanest option · neutral, crisp</span></div>
+<div class="sample inter"><div class="navigation"><span>Overview</span><span class="active">CPU</span><span>Memory</span><span>Processes</span></div><div class="content"><div><div class="label">CPU utilization</div><div class="value">24.8%</div><div class="detail">3.72 GHz · 68.4 W · 52 °C</div></div><table><thead><tr><th>Process</th><th>CPU</th></tr></thead><tbody><tr><td>task_master</td><td>1.8%</td></tr><tr><td>firefox</td><td>12.4%</td></tr><tr><td>collector</td><td>0.3%</td></tr></tbody></table></div><div class="characters">0123456789 &nbsp; Il1 O0 &nbsp; PID 18402 &nbsp; 16.8 GiB / 64.0 GiB</div></div>
+</section>
+<section class="option" aria-label="Source Sans 3 sample">
+<div class="caption"><a href="https://github.com/adobe-fonts/source-sans" target="_blank" rel="noopener">Source Sans 3</a><span>Dense lists · compact, easygoing</span></div>
+<div class="sample source"><div class="navigation"><span>Overview</span><span class="active">CPU</span><span>Memory</span><span>Processes</span></div><div class="content"><div><div class="label">CPU utilization</div><div class="value">24.8%</div><div class="detail">3.72 GHz · 68.4 W · 52 °C</div></div><table><thead><tr><th>Process</th><th>CPU</th></tr></thead><tbody><tr><td>task_master</td><td>1.8%</td></tr><tr><td>firefox</td><td>12.4%</td></tr><tr><td>collector</td><td>0.3%</td></tr></tbody></table></div><div class="characters">0123456789 &nbsp; Il1 O0 &nbsp; PID 18402 &nbsp; 16.8 GiB / 64.0 GiB</div></div>
+</section>
+</div>
+<script>
+Promise.all(['IBM Plex Sans','Inter','Source Sans 3'].map(async name=>{const faces=await document.fonts.load('14px "'+name+'"');console.log(name+': '+faces.length+' font faces loaded')})).catch(error=>console.error(error));
+</script>
+</body>
+</html>

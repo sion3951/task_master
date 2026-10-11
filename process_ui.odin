@@ -346,15 +346,16 @@ process_panel :: proc(a:^App,x,y,w,h:f32,gpu:bool=false,unboxed:bool=false) {
             name:=string(p.name[:p.name_len])
             label:=fmt.tprintf("%s (%d)",name,p.pid_count) if p.pid_count>1 else name
             pinned:=i<a.process_cache.pinned_count
-            if pinned {rect(a,x+18,row_y-7,3,3,CYAN)}
-            fit_text(a,label,x+26 if pinned else x+18,row_y,pid_start-x-42 if pinned else pid_start-x-34,14)
+            other_gpu:=gpu&&p.gpu_mask!=0&&(p.gpu_mask&(u8(1)<<u32(a.selected_gpu)))==0
+            if pinned {rect(a,x+18,row_y-7,3,3,MUTED if other_gpu else CYAN)}
+            fit_text(a,label,x+26 if pinned else x+18,row_y,pid_start-x-42 if pinned else pid_start-x-34,14,MUTED if other_gpu else TEXT)
             cpu_color:=utilization_color(p.cpu_percent) if data.cpu_available else SOFT
             memory_used:=p.gpu_memory_bytes if gpu else p.memory_bytes
             memory_known:=!gpu||p.gpu_memory_available
             memory_color:=utilization_color(memory_pct(memory_used,memory_capacity)) if memory_capacity>0&&memory_known else SOFT
             exited:=p.pid_count==0
-            right_text(a,"-" if exited else fmt.tprintf("%.1f",p.cpu_percent),x+w-144,row_y,14,MUTED if exited else cpu_color)
-            right_text(a,"-" if exited else (bytes_label(memory_used) if memory_known else "N/A"),x+w-18,row_y,14,MUTED if exited else memory_color)
+            right_text(a,"-" if exited else fmt.tprintf("%.1f",p.cpu_percent),x+w-144,row_y,14,MUTED if exited||other_gpu else cpu_color)
+            right_text(a,"-" if exited else (bytes_label(memory_used) if memory_known else "N/A"),x+w-18,row_y,14,MUTED if exited||other_gpu else memory_color)
             width:=pid_width-16 if row.overflow||row.expanded else pid_width
             if exited {right_text(a,"Exited",pid_end,row_y,12,MUTED)}
             else {

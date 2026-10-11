@@ -5,7 +5,7 @@ process information you would look for in btop with the GPU information you
 would look for in nvtop. Written in Odin, rendered directly with Metal on macOS
 and Vulkan on Linux and Windows.
 
-## Version 1.0.4
+## Version 1.0.5
 
 - Overview, CPU, GPU and Mem+IO dashboards with live graphs and process tables.
 - Local and SSH-connected machines in one window, with automatic collector deployment.
@@ -16,9 +16,9 @@ and Vulkan on Linux and Windows.
 Download installers from this repository's **Releases** page: Linux AppImage or
 Debian package (x64/ARM64), Windows setup executable, or macOS package
 (Intel/Apple Silicon). Source builds and the installer workflow now provide native
-Windows x64 and ARM64 packages; older x64-only releases use emulation on ARM64. The `v1.0.4` tag
+Windows x64 and ARM64 packages; older x64-only releases use emulation on ARM64. The `v1.0.5` tag
 starts the installer workflow; downloads appear after all builds succeed.
-See the [v1.0.4 release notes](docs/releases/v1.0.4.md) for changes and download
+See the [v1.0.5 release notes](docs/releases/v1.0.5.md) for changes and download
 details, and the installation sections below for platform requirements.
 
 The application name is exactly `task_master`. Debian uses `task-master` for
@@ -74,7 +74,10 @@ and `.deb` packages, native Windows x64 and ARM64 setup `.exe` installers,
 and native Intel/Apple Silicon macOS `.pkg` installers on `v*` tags
 or from **Run workflow**. Manual runs upload downloadable artifacts; tagged runs
 attach all installers and a combined `SHA256SUMS` to the GitHub release. It first
-builds Linux, Windows and macOS collectors and embeds all six payloads into each desktop, retaining automatic remote deployment.
+publishes Linux, Windows and macOS collectors as separate release assets. Each
+installer includes only its native collector and local runtime. Other remote
+helpers are downloaded for the detected OS/architecture when needed, verified
+against signed release metadata and cached for reuse.
 The compiler, GLFW, AppImage tool/runtime and Actions revisions are pinned.
 
 Release binaries build on Ubuntu 22.04 (glibc 2.35). AppImages bundle FreeType,
@@ -89,11 +92,11 @@ Ubuntu 22.04 build environment for distribution.
 Local release packaging uses the same scripts:
 
 ```sh
-# Import the six collectors produced by their native build hosts:
-make packages COLLECTOR_ARGS="--linux-dir artifacts --windows-dir artifacts --mac-dir artifacts"
+# Build native installers without other platforms' build artifacts:
+make packages
 # Or build one format:
-make appimage COLLECTOR_ARGS="--linux-dir artifacts --windows-dir artifacts --mac-dir artifacts"
-make deb COLLECTOR_ARGS="--linux-dir artifacts --windows-dir artifacts --mac-dir artifacts"
+make appimage
+make deb
 ```
 
 `build/packages/` contains `task_master-<version>-x86_64.AppImage` or
@@ -102,8 +105,7 @@ make deb COLLECTOR_ARGS="--linux-dir artifacts --windows-dir artifacts --mac-dir
 `VERSION` supplies the local version; override it with
 `PACKAGE_ARGS="--version 1.2.3"`. The package scripts accept `--build-dir` and
 `--output-dir` when packaging already-built binaries. `make packages-development`
-uses whichever remote payloads are currently available and is explicitly a
-development build.
+uses the native development binaries.
 
 AppImage packaging needs Python 3, `patchelf`, and the libraries listed in
 `scripts/ci/setup-linux.sh`. Its tool/runtime download is checksum-verified and
@@ -173,23 +175,19 @@ frameworks without third-party graphics libraries or `glslc`.
 xcode-select --install
 # Install the checksum-verified compiler used by Mac CI:
 sh scripts/ci/setup-odin.sh
-# A native development bundle embeds whichever remote payloads are present:
+# Build a native bundle with its own collector:
 ODIN=build/toolchains/odin/odin sh scripts/build-macos.sh --arch native --development
 # Open build/macos-arm64/task_master.app on Apple Silicon, or macos-amd64 on Intel.
 ```
 
-For a complete release, build the two thin macOS collector payloads independently,
-then combine them with the Linux and Windows release inputs:
+Build both macOS desktop architectures or export their collectors independently:
 
 ```sh
 sh scripts/build-macos.sh --collector-only
-# Import Linux x64/ARM64 and Windows collector artifacts from their build hosts:
-sh scripts/build-macos.sh --linux-dir artifacts/linux --windows-dir artifacts/windows
+sh scripts/build-macos.sh --arch all
 ```
 
-The complete build requires all six collector payloads and the Windows build's
-`task_master-windows-sensors.zip`, keeping every remote
-platform available from either macOS desktop architecture. It produces
+No Linux or Windows payloads are bundled or required. The build produces
 `build/macos-amd64/task_master.app` and `build/macos-arm64/task_master.app`.
 Both desktop architectures and collectors build with the same Apple SDK;
 `--arch native` builds only the host architecture. The bundle contains the
@@ -299,7 +297,7 @@ when preparing release inputs on a separate machine.
 ```powershell
 # Build the pinned Odin revision with the Windows ARM64 compiler/runtime patch:
 .\scripts\ci\setup-odin-windows.ps1
-# Both builds embed separate native Windows x64 and ARM64 collectors:
+# Each build includes only its native Windows collector and sensor runtime:
 .\scripts\build-windows.ps1 -Architecture x64
 .\scripts\build-windows.ps1 -Architecture arm64
 # Or supply an existing static MSVC library for the selected architecture:
@@ -386,16 +384,16 @@ ARM64 builds use native static FreeType, GLFW and screenshot libraries.
 The chosen CPU sensor provider supports Intel/AMD x64, so ARM64 CPU package
 watts and hardware sensor clocks are not provided by it. Windows frequency,
 CPU, RAM, processes and WDDM GPU counters remain available. Remote sensor
-archives carry both native runtimes; their installer selects the host architecture.
+archives contain only the detected host's native runtime.
 
-For a Linux desktop release embedding all supported collector payloads:
+For a native Linux desktop release:
 
 ```sh
-make release COLLECTOR_ARGS="--linux-dir artifacts --windows-dir artifacts --mac-dir artifacts"
+make release
 ```
 
-`make` remains a native development build; additional payloads already in
-`build` are embedded when present. With the patched Odin toolchain,
+`make` remains a native development build. Other platforms' payloads in `build`
+are not bundled. With the patched Odin toolchain,
 `make windows-check ODIN=<patched-odin>` generates Windows x64 and ARM64
 COFF objects for the desktop and headless collector without executing Windows. Full Windows runtime/device validation
 must be performed on Windows; a cross compile is not a hardware validation.
@@ -633,8 +631,11 @@ On Linux it installs `setcap` if needed and grants the root-owned collector
 `CAP_PERFMON`. On macOS it installs the collector and Apple's `powermetrics`
 sensor LaunchDaemon. On Windows it installs the collector and the existing
 sensor service/PawnIO installer; the SSH account must have an administrator
-token. Complete releases carry the Windows sensor archive as well as all six
-collectors. Development builds report missing payloads in the terminal.
+token. Setup downloads only the required remote collector and, for Windows,
+the matching sensor archive. Helpers must belong to the desktop's exact release
+version and pass its signed size/checksum verification. The first uncached setup
+needs internet access on the local machine; subsequent setups reuse verified
+files in the user's `task_master/helpers` cache. Remote machines need only SSH.
 
 After the initial interactive trust/authentication check, installation requires
 passwordless SSH. Linux/macOS administrator passwords are entered into `sudo`
@@ -646,19 +647,20 @@ reporting installation success. Temporary installation files are cleaned up. The
 interactive passwordless SSH shell for troubleshooting. GPU readings use the
 host's existing GPU driver; unavailable hardware sensors retain their status.
 
-The desktop carries its headless samplers. Automatic deployment selects the
+The desktop carries its native headless sampler. Automatic deployment selects the
 remote operating system and CPU architecture, preferring a compatible installed
 collector at `/usr/libexec/task_master/collector` for Linux packages,
 `/usr/local/libexec/task_master/collector` for source/AppImage and macOS installs, or the
-Windows install location. Otherwise it sends the matching embedded sampler
-over SSH into a private temporary directory, starts collection, and removes the
+Windows install location. Otherwise it uses the native embedded sampler or
+downloads and caches a verified sampler for the other OS/architecture, then sends
+it over SSH into a private temporary directory, starts collection, and removes the
 directory when the session ends. Linux samplers need a compatible libc
 (the current Linux build requires glibc 2.34 or newer); macOS samplers target
 macOS 13+, and Windows samplers target Windows 11+.
 
 Ordinary reconnections reuse the installed collector without administrator
 prompts. The collector announces installed or temporary mode before transfer,
-so an installed collector does not require uploading the bundled binary. The
+so a compatible installed collector needs neither a download nor an upload. The
 first snapshot verifies collector identity, version, capabilities and
 OS/architecture. Detected platform information is reused across reconnects;
 a mismatch invalidates it for the next attempt. Temporary mode is clearly
@@ -688,7 +690,7 @@ installs a root-owned collector with only `CAP_PERFMON`, and prints a one-second
 power sample. Restart task_master to open the installed power counters.
 The collector drops its capability before loading NVML and runs only for the
 SSH session. Repeat the installation after updating collector code; incompatible
-protocol versions automatically use the embedded sampler until reinstalled.
+protocol versions automatically use the matching native or downloaded sampler until reinstalled.
 An absent installation leaves all other telemetry available. Ports and jump
 hosts continue to use your SSH config.
 

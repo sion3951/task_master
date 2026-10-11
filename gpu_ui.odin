@@ -274,7 +274,7 @@ gpu_dashboard :: proc(a:^App) {
         history_time_label(a,slot,a.gpu_pinned_slot>=0,cursor_x,graph_xs[label_graph],graph_ys[label_graph],graph_ws[label_graph],graph_hs[label_graph])
     }
     graph_controls_draw(a,gx,graph_bottom+time_axis_h+8,gw)
-    if m.gpu_count>1 {fit_text(a,"Processes across all GPUs",x,process_y-12-offset,w,12,MUTED)}
+    if m.gpu_count>1 {fit_text(a,"Processes across all GPUs / other GPUs shown in grey",x,process_y-12-offset,w,12,MUTED)}
     // Keep the process table's established sorting, PID expansion and scrolling.
     process_panel(a,x-18,process_y-offset,w+36,process_h,gpu=true,unboxed=true)
     if max_scroll>0 {

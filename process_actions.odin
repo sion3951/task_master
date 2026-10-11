@@ -68,7 +68,9 @@ exit "$failed"
             if !ok||platform!=.Darwin {process_kill_error(action,"Could not identify the macOS collector architecture.");return false}
             architecture=detected
         }
-        command,binary=process_kill_darwin_command(architecture,action.collector)
+        helper_error:string
+        command,binary,helper_error=process_kill_darwin_command(architecture,action)
+        if helper_error!="" {process_kill_error(action,helper_error);return false}
         defer delete(command)
     } else if action.windows {command=process_kill_windows_command();defer delete(command)}
     s,start_error:=remote_ssh_start(action.host,command,action.port)

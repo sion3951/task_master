@@ -29,7 +29,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$version" ] || version=$(cat VERSION)
 [ "$(uname -s)" = Linux ] || { echo 'Debian packages must be assembled on Linux.' >&2; exit 1; }
-for tool in dpkg dpkg-deb dpkg-shlibdeps python3 patchelf; do
+for tool in dpkg dpkg-deb dpkg-shlibdeps python3 patchelf strip; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "Missing $tool. Install dpkg-dev, python3 and patchelf on the Debian/Ubuntu build host." >&2
         exit 1
@@ -74,6 +74,8 @@ python3 scripts/bundle-linux-libraries.py "$build_dir/task_master" \
 install -m 755 "$build_dir/task_master-collector" "$stage/usr/libexec/task_master/collector"
 # A capability-bearing executable must resolve only trusted system libraries.
 patchelf --remove-rpath "$stage/usr/libexec/task_master/collector"
+strip --strip-unneeded "$stage/usr/bin/task_master" "$stage/usr/libexec/task_master/collector" \
+    "$stage/usr/lib/task_master/libglfw.so.3"
 install -m 644 assets/linux/task_master.desktop "$stage/usr/share/applications/task_master.desktop"
 install -m 644 assets/linux/task_master.svg "$stage/usr/share/icons/hicolor/scalable/apps/task_master.svg"
 install -m 644 README.md "$stage/usr/share/doc/task_master/README.md"
@@ -112,5 +114,6 @@ for name, value in values.items():
 pathlib.Path(output).write_text(text)
 PY
 package=$output_dir/task_master_${version}_${architecture}.deb
-dpkg-deb --root-owner-group --build "$stage" "$package"
+# Use XZ rather than the host distribution's default (often Zstandard).
+dpkg-deb --root-owner-group -Zxz -z9 --build "$stage" "$package"
 echo "Built $package"

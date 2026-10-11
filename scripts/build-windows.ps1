@@ -8,6 +8,7 @@ param(
     [string] $VcpkgRoot = $env:VCPKG_ROOT,
     [string] $FreeTypeLibrary,
     [string] $GlfwLibrary,
+    # Retained for existing callers; native packages do not import remote helpers.
     [string] $LinuxCollectorDirectory = 'build/collectors',
     [string] $MacCollectorDirectory = 'build/collectors',
     [string] $OutputDirectory,
@@ -39,71 +40,40 @@ try {
     New-Item -ItemType Directory -Force -Path $output, 'build/collector-src' | Out-Null
     Get-ChildItem 'build/collector-src/*.odin' | Remove-Item
     Copy-Item 'telemetry*.odin', 'remote_protocol.odin', 'collector/*.odin' -Destination 'build/collector-src'
-    # Always build native payloads for both Windows architectures. Every desktop
-    # embeds both, so remote deployment retains x64 and ARM64 hosts.
+    # Desktop builds only need their own architecture. Collector-only release
+    # builds export both architectures for signed, on-demand remote downloads.
+    $collectorArchitectures = if ($CollectorOnly) { @('amd64', 'arm64') } else { @($targetArch) }
     New-Item -ItemType Directory -Force -Path 'build/collectors' | Out-Null
-    foreach ($arch in @('amd64', 'arm64')) {
+    foreach ($arch in $collectorArchitectures) {
         $payload = [IO.Path]::GetFullPath("build/collectors/task_master-collector-windows-$arch.exe")
         Invoke-Checked $Odin @('build', 'build/collector-src', "-target:windows_$arch", "-out:$payload", '-o:speed', '-vet', "-define:TASK_MASTER_VERSION=$Version", '-define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536')
         Move-Item -Force $payload ([IO.Path]::GetFullPath("build/collectors/task_master-collector-windows-$arch"))
     }
+    $sensorRoot = [IO.Path]::GetFullPath('build/windows-sensors')
+    if (Test-Path $sensorRoot) { Remove-Item $sensorRoot -Recurse -Force }
+    $sensorArchitectures = if ($CollectorOnly) { @('x64', 'arm64') } else { @($Architecture) }
+    if ($CollectorOnly) { Add-Type -AssemblyName System.IO.Compression.FileSystem }
+    foreach ($arch in $sensorArchitectures) {
+        $sensorPayload = Join-Path $sensorRoot $arch
+        Invoke-Checked 'dotnet' @('publish', 'sensors/windows/task_master.Sensors.csproj', '-c', 'Release', '-r', "win-$arch", '--self-contained', 'true', '-p:RestoreLockedMode=true', '-o', $sensorPayload)
+        # PawnIO serves Intel/AMD hardware; native ARM64 setup skips this driver.
+        if ($arch -eq 'x64') {
+            & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory $sensorPayload -PrepareDriverOnly
+        }
+        if ($CollectorOnly) {
+            $payloadArch = if ($arch -eq 'x64') { 'amd64' } else { 'arm64' }
+            $sensorArchive = [IO.Path]::GetFullPath("build/collectors/task_master-windows-sensors-$payloadArch.zip")
+            if (Test-Path -LiteralPath $sensorArchive) { Remove-Item -LiteralPath $sensorArchive }
+            # Each ZIP has one native runtime at its root; only x64 includes PawnIO.
+            [IO.Compression.ZipFile]::CreateFromDirectory($sensorPayload, $sensorArchive)
+        }
+    }
+    if ($CollectorOnly) { return }
     $collector = Join-Path $output 'task_master-collector.exe'
     Copy-Item "build/collectors/task_master-collector-windows-$targetArch" $collector
-    $sensorRoot = [IO.Path]::GetFullPath('build/windows-sensors')
-    # The remote sensor archive carries both runtimes; the installer selects the
-    # machine architecture before registering the service.
-    if (Test-Path $sensorRoot) { Remove-Item $sensorRoot -Recurse -Force }
-    foreach ($arch in @('x64', 'arm64')) {
-        Invoke-Checked 'dotnet' @('publish', 'sensors/windows/task_master.Sensors.csproj', '-c', 'Release', '-r', "win-$arch", '--self-contained', 'true', '-p:RestoreLockedMode=true', '-o', (Join-Path $sensorRoot $arch))
-    }
-    & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory (Join-Path $sensorRoot 'x64') -PrepareDriverOnly
-    Copy-Item (Join-Path $sensorRoot 'x64/PawnIO_setup.exe') (Join-Path $sensorRoot 'PawnIO_setup.exe')
     $sensors = Join-Path $output 'sensors'
     if (Test-Path $sensors) { Remove-Item $sensors -Recurse -Force }
     Copy-Item (Join-Path $sensorRoot $Architecture) $sensors -Recurse
-    Copy-Item (Join-Path $sensorRoot 'PawnIO_setup.exe') $sensors
-    $sensorArchive = [IO.Path]::GetFullPath('build/task_master-windows-sensors.zip')
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    if (Test-Path -LiteralPath $sensorArchive) { Remove-Item -LiteralPath $sensorArchive }
-    [IO.Compression.ZipFile]::CreateFromDirectory($sensorRoot, $sensorArchive)
-    Copy-Item $sensorArchive 'build/collectors/'
-    if ($CollectorOnly) { return }
-    # Require real Linux payloads for the complete desktop. Windows collector-only
-    # builds are independent, allowing each OS to publish its own release inputs.
-    $linux = [IO.Path]::GetFullPath($LinuxCollectorDirectory)
-    $linuxAmd64 = Join-Path $linux 'task_master-collector-linux-amd64'
-    $linuxArm64 = Join-Path $linux 'task_master-collector-linux-arm64'
-    foreach ($payload in @($linuxAmd64, $linuxArm64)) {
-        if (-not (Test-Path -LiteralPath $payload) -or (Get-Item -LiteralPath $payload).Length -eq 0) {
-            throw "Missing Linux payload $payload. Run scripts/build-collectors.sh on Linux x64 and ARM64 and place both outputs in $LinuxCollectorDirectory."
-        }
-        $bytes = [IO.File]::ReadAllBytes($payload)
-        if ($bytes.Length -lt 20 -or $bytes[0] -ne 0x7f -or $bytes[1] -ne 0x45 -or $bytes[2] -ne 0x4c -or $bytes[3] -ne 0x46) {
-            throw "Collector payload is not an ELF executable: $payload"
-        }
-        $machine = [BitConverter]::ToUInt16($bytes, 18)
-        $expected = if ($payload -eq $linuxAmd64) { 62 } else { 183 }
-        if ($machine -ne $expected) { throw "Collector architecture does not match its filename: $payload" }
-    }
-
-    # Keep macOS remotes available from Windows release packages too.
-    $mac = [IO.Path]::GetFullPath($MacCollectorDirectory)
-    $macAmd64 = Join-Path $mac 'task_master-collector-darwin-amd64'
-    $macArm64 = Join-Path $mac 'task_master-collector-darwin-arm64'
-    foreach ($payload in @($macAmd64, $macArm64)) {
-        if (-not (Test-Path -LiteralPath $payload) -or (Get-Item -LiteralPath $payload).Length -eq 0) {
-            throw "Missing macOS payload $payload. Build both collectors on macOS and place them in $MacCollectorDirectory."
-        }
-        $bytes = [IO.File]::ReadAllBytes($payload)
-        if ($bytes.Length -lt 32 -or [BitConverter]::ToUInt32($bytes, 0) -ne 0xfeedfacfL) {
-            throw "Collector payload is not a 64-bit Mach-O executable: $payload"
-        }
-        $cpu = [BitConverter]::ToUInt32($bytes, 4)
-        $expected = if ($payload -eq $macAmd64) { 0x01000007 } else { 0x0100000c }
-        if ($cpu -ne $expected -or [BitConverter]::ToUInt32($bytes, 12) -ne 2) {
-            throw "macOS collector architecture or executable type does not match its filename: $payload"
-        }
-    }
 
     $needShaderCompiler = $Glslc -eq 'glslc' -and -not (Get-Command $Glslc -ErrorAction SilentlyContinue)
     if (-not $FreeTypeLibrary -or $needShaderCompiler) {
@@ -134,15 +104,10 @@ try {
         Invoke-Checked 'cmake' @('--build', $glfwBuild, '--config', 'Release', '--parallel', [string][Environment]::ProcessorCount)
         $GlfwLibrary = "$glfwBuild/src/Release/glfw3.lib"
     }
+    $nativeCollector = ([IO.Path]::GetFullPath("build/collectors/task_master-collector-windows-$targetArch")).Replace('\','/')
     $defines = @(
         "-define:TASK_MASTER_VERSION=$Version",
-        "-define:TASK_MASTER_WINDOWS_SENSORS=$($sensorArchive.Replace('\','/'))",
-        "-define:TASK_MASTER_COLLECTOR_LINUX_AMD64=$($linuxAmd64.Replace('\','/'))",
-        "-define:TASK_MASTER_COLLECTOR_LINUX_ARM64=$($linuxArm64.Replace('\','/'))",
-        "-define:TASK_MASTER_COLLECTOR_DARWIN_AMD64=$($macAmd64.Replace('\','/'))",
-        "-define:TASK_MASTER_COLLECTOR_DARWIN_ARM64=$($macArm64.Replace('\','/'))",
-        "-define:TASK_MASTER_COLLECTOR_WINDOWS_AMD64=$(([IO.Path]::GetFullPath('build/collectors/task_master-collector-windows-amd64')).Replace('\','/'))",
-        "-define:TASK_MASTER_COLLECTOR_WINDOWS_ARM64=$(([IO.Path]::GetFullPath('build/collectors/task_master-collector-windows-arm64')).Replace('\','/'))",
+        "-define:TASK_MASTER_COLLECTOR_WINDOWS_$($targetArch.ToUpperInvariant())=$nativeCollector",
         "-collection:task_master_freetype=$((Split-Path $freeType -Parent).Replace('\','/'))",
         "-define:FREETYPE_LIBRARY=task_master_freetype:$(Split-Path $freeType -Leaf)"
     )
@@ -150,7 +115,7 @@ try {
         $glfw = (Resolve-Path -LiteralPath $GlfwLibrary).Path
         $defines += @("-collection:task_master_glfw=$((Split-Path $glfw -Parent).Replace('\','/'))", "-define:GLFW_LIBRARY=task_master_glfw:$(Split-Path $glfw -Leaf)")
     }
-    Invoke-Checked $Odin (@('build', '.', "-target:windows_$targetArch", "-out:$(Join-Path $output 'task_master.exe')", '-o:speed', '-no-bounds-check', '-vet', '-subsystem:windows', '-define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536') + $defines)
+    Invoke-Checked $Odin (@('build', '.', "-target:windows_$targetArch", "-out:$(Join-Path $output 'task_master.exe')", '-o:speed', '-no-bounds-check', '-vet', '-subsystem:windows', '-resource:packaging/windows/task_master.rc', '-define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536') + $defines)
     Copy-Item 'scripts/install-windows.ps1', 'scripts/install-sensors.ps1', 'README.md' -Destination $output
     New-Item -ItemType Directory -Force -Path (Join-Path $output 'licenses') | Out-Null
     Copy-Item 'assets/FONT-LICENSE.txt' -Destination (Join-Path $output 'licenses')

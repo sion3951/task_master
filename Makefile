@@ -8,8 +8,7 @@ PACKAGE_VERSION ?= $(shell cat VERSION)
 ODIN_VERSION_FLAGS := -define:TASK_MASTER_VERSION=$(PACKAGE_VERSION)
 TELEMETRY_SOURCES := $(wildcard telemetry*.odin)
 COLLECTOR_SOURCES := $(wildcard collector/*.odin)
-# Embed available extra payloads in development builds. The release target
-# requires the complete set, so a Windows desktop also retains Linux remotes.
+# Each desktop embeds only its native collector; remote helpers are fetched on demand.
 NATIVE_PAYLOAD_OS := $(shell uname -s | tr A-Z a-z)
 ifeq ($(NATIVE_PAYLOAD_OS),darwin)
 GRAPHICS_SOURCES := shaders/ui.metal
@@ -18,15 +17,6 @@ else
 GRAPHICS_SOURCES := shaders/ui.vert.spv shaders/ui.frag.spv
 endif
 WINDOW_SOURCES := $(wildcard desktop_window/*.odin)
-NATIVE_PAYLOAD_ARCH := $(shell uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
-EXTRA_PAYLOADS := $(wildcard build/task_master-windows-sensors.zip build/task_master-collector-linux-amd64 build/task_master-collector-linux-arm64 build/task_master-collector-linux-riscv64 build/task_master-collector-windows-amd64 build/task_master-collector-windows-arm64 build/task_master-collector-darwin-amd64 build/task_master-collector-darwin-arm64)
-REMOTE_PAYLOAD_FLAGS := $(foreach arch,$(filter-out $(if $(filter linux,$(NATIVE_PAYLOAD_OS)),$(NATIVE_PAYLOAD_ARCH)),amd64 arm64 riscv64),$(if $(wildcard build/task_master-collector-linux-$(arch)),-define:TASK_MASTER_COLLECTOR_LINUX_$(shell echo $(arch) | tr a-z A-Z)=build/task_master-collector-linux-$(arch)))
-REMOTE_PAYLOAD_FLAGS += $(foreach arch,amd64 arm64,$(if $(wildcard build/task_master-collector-windows-$(arch)),-define:TASK_MASTER_COLLECTOR_WINDOWS_$(shell echo $(arch) | tr a-z A-Z)=build/task_master-collector-windows-$(arch)))
-
-REMOTE_PAYLOAD_FLAGS += $(foreach arch,amd64 arm64,$(if $(wildcard build/task_master-collector-darwin-$(arch)),-define:TASK_MASTER_COLLECTOR_DARWIN_$(shell echo $(arch) | tr a-z A-Z)=build/task_master-collector-darwin-$(arch)))
-
-REMOTE_PAYLOAD_FLAGS += $(if $(wildcard build/task_master-windows-sensors.zip),-define:TASK_MASTER_WINDOWS_SENSORS=build/task_master-windows-sensors.zip)
-
 .PHONY: all run clean check collector collectors windows-check macos-check macos release install install-remote appimage deb packages packages-development
 export HOST
 all: build/task_master build/task_master-collector
@@ -37,9 +27,9 @@ shaders/ui.vert.spv: shaders/ui.vert
 shaders/ui.frag.spv: shaders/ui.frag
 	$(GLSLC) $(GLSLC_FLAGS) $< -o $@
 
-build/task_master: $(wildcard *.odin) $(WINDOW_SOURCES) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist $(GRAPHICS_SOURCES) assets/DejaVuSans.ttf build/task_master-collector $(EXTRA_PAYLOADS)
+build/task_master: $(wildcard *.odin) $(WINDOW_SOURCES) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist $(GRAPHICS_SOURCES) assets/DejaVuSans.ttf build/task_master-collector
 	mkdir -p build
-	$(ODIN) build . -out:$@ -o:speed -no-bounds-check -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(ODIN_NATIVE_FLAGS) $(REMOTE_PAYLOAD_FLAGS)
+	$(ODIN) build . -out:$@ -o:speed -no-bounds-check -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(ODIN_NATIVE_FLAGS)
 
 # Stage just the shared sampler and protocol; the remote agent has no GLFW or
 # Vulkan dependency and does not require a display server.
@@ -50,14 +40,12 @@ build/task_master-collector: $(TELEMETRY_SOURCES) remote_protocol.odin $(COLLECT
 
 collector: build/task_master-collector
 
-# Build this host's collector and import Windows artifacts when supplied.
-# For a complete release, require every target payload before embedding.
+# Build or import separately published remote collector assets when requested.
 collectors:
 	sh scripts/build-collectors.sh $(COLLECTOR_ARGS)
 
 release:
-	sh scripts/build-collectors.sh --all $(COLLECTOR_ARGS)
-	$(MAKE) -B build/task_master
+	$(MAKE) -B all
 
 # Typecheck and generate Windows COFF objects without installing or running it.
 windows-check: shaders/ui.vert.spv shaders/ui.frag.spv build/task_master-collector
@@ -76,8 +64,7 @@ macos-check: shaders/ui.metal build/task_master-collector
 macos:
 	sh scripts/build-macos.sh $(MACOS_ARGS)
 
-# Release packages retain every remote OS/architecture. Import collector
-# artifacts through COLLECTOR_ARGS as for the existing release target.
+# Release packages contain only this machine's native runtime payloads.
 appimage: release
 	sh scripts/build-appimage.sh $(PACKAGE_ARGS)
 
@@ -89,7 +76,7 @@ packages: release
 	sh scripts/build-deb.sh $(PACKAGE_ARGS)
 	cd build/packages && sha256sum *.AppImage *.deb > SHA256SUMS
 
-# Explicit local-development packaging uses the payloads already present.
+# Local-development packaging uses the same native-only payloads.
 packages-development: all
 	sh scripts/build-appimage.sh $(PACKAGE_ARGS)
 	sh scripts/build-deb.sh $(PACKAGE_ARGS)

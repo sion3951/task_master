@@ -33,7 +33,7 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'sensors.zip')) {
         if (Test-Path -LiteralPath $sensors) { Remove-Item -LiteralPath $sensors -Recurse -Force }
     }
 } elseif (-not (Get-Service -Name task_master_sensors -ErrorAction SilentlyContinue)) {
-    throw 'Collector installed, but this development build has no Windows sensor payload. Use a complete release build and retry to install power/clock sensors.'
+    throw 'Collector installed, but the Windows sensor helper was not prepared. Retry Setup / fix with internet access to download its verified sensor payload.'
 }
 $actualProtocol = & $target --protocol-version
 if ($LASTEXITCODE -ne 0 -or [string]$actualProtocol -ne [string]$ExpectedProtocol) { throw "Installed collector protocol $actualProtocol does not match $ExpectedProtocol. Retry with a matching release build." }
