@@ -57,6 +57,10 @@ CPU_Sample :: struct {
     cores: [256]CPU_Core_Sample,
     logical: [256]f32,
     gpu: GPU_Sample,
+    gpus: [8]GPU_Sample,
+    gpu_count: int,
+    cpu_package_power: [16]CPU_Package_Power,
+    cpu_package_power_count: int,
 }
 Machine_State :: struct {
     metrics: Metrics,
@@ -81,6 +85,7 @@ Machine_State :: struct {
     process_scroll: [5]f32,
     cpu_history: [HISTORY_CAPACITY]CPU_Sample,
     graph_smoothing: ^Graph_Smoothing,
+    selected_cpu, selected_gpu: int,
     cpu_scroll: f32,
     overview_scroll: f32,
     cpu_pinned_slot: int,
@@ -183,6 +188,8 @@ App :: struct {
     persistence_reconnect_pending: bool,
     persistence_reader: ^Persistence_Reader,
     persistence_live_reader: ^Persistence_Reader,
+    updater: ^Updater,
+    update_dialog: bool,
 }
 
 // Headless service workers use the same sampling code without touching GLFW.
@@ -500,6 +507,7 @@ history_push :: proc(a:^App,timestamp:f64=0) {
         logical=m.cores}
     a.history_connected=true
     sample.gpu=gpu_sample(&m.gpus[0],m.gpu_count>0)
+    history_device_sample(sample,m)
     for core,i in m.physical_cores[:m.physical_core_count] {
         sample.cores[i]=CPU_Core_Sample{lower=core.busy_lower,upper=core.busy_upper,
             frequency_mhz=core.frequency_mhz,frequency_available=core.frequency_available}
@@ -547,7 +555,7 @@ navigation :: proc(a:^App)->f32 {
         text(a,name,x,y+16,12,TEXT if int(a.view)==i else MUTED)
         x+=widths[i]+gap
     }
-    return persistence_control(a,start)
+    return persistence_control(a,updater_control(a,start))
 }
 
 persistence_control :: proc(a:^App,nav_x:f32)->f32 {
@@ -701,6 +709,8 @@ draw :: proc(a:^App) {
     mx,my=window_ui_position(a,mx,my)
     a.mouse_x,a.mouse_y=f32(mx),f32(my)
     a.content_x=16
+    update_click:=a.click
+    if a.update_dialog {a.click=false}
     process_menu_handle(a)
     machine_overlay_handle(a)
     rect(a,0,0,a.width,a.height,BG)
@@ -715,6 +725,7 @@ draw :: proc(a:^App) {
     graph_freeze_message(a)
     process_freeze_message(a)
     graph_controls_message(a)
+    if a.update_dialog {a.click=update_click;updater_dialog_draw(a);a.click=false}
     if !renderer_draw(&a.renderer,a.vertices[:],image) {glfw.SetWindowShouldClose(a.renderer.window,true)}
     if cap(a.vertices)>4096&&len(a.vertices)<=cap(a.vertices)/4 {
         a.vertex_small_frames+=1
@@ -741,6 +752,10 @@ mouse_button_callback :: proc "c" (window:glfw.WindowHandle,button,action,mods:i
     context=runtime.default_context()
     a:=cast(^App)glfw.GetWindowUserPointer(window)
     if a==nil {return}
+    if a.update_dialog {
+        if button==glfw.MOUSE_BUTTON_LEFT&&action==glfw.PRESS {a.pending_click=true}
+        a.dirty=true;return
+    }
     x,y:=glfw.GetCursorPos(window)
     x,y=window_ui_position(a,x,y)
     if graph_control_pointer(a,button,action,f32(x),f32(y),mods) {return}
@@ -767,6 +782,7 @@ scroll_callback :: proc "c" (window:glfw.WindowHandle,xoffset,yoffset:f64) {
     context=runtime.default_context()
     a:=cast(^App)glfw.GetWindowUserPointer(window)
     if a==nil {return}
+    if a.update_dialog {return}
     if a.machine_dialog {a.machine_dialog_scroll=max(0,a.machine_dialog_scroll-int(yoffset));a.dirty=true;return}
     if a.machine_menu {a.machine_menu_scroll=max(0,a.machine_menu_scroll-int(yoffset));a.dirty=true;return}
     if a.process_menu_open {
@@ -796,6 +812,7 @@ cursor_callback :: proc "c" (window:glfw.WindowHandle,x,y:f64) {
     a:=cast(^App)glfw.GetWindowUserPointer(window)
     if a==nil {return}
     ui_x,ui_y:=window_ui_position(a,x,y)
+    if a.update_dialog {a.mouse_x,a.mouse_y=f32(ui_x),f32(ui_y);a.dirty=true;return}
     if graph_control_motion(a,f32(ui_x)) {a.mouse_x,a.mouse_y=f32(ui_x),f32(ui_y);return}
     if graph_control_hovered(a,f32(ui_x),f32(ui_y))>=0||graph_control_hovered(a,a.mouse_x,a.mouse_y)>=0 {a.dirty=true}
     machine_pointer_motion(a,f32(ui_x),f32(ui_y))
@@ -818,6 +835,8 @@ cursor_callback :: proc "c" (window:glfw.WindowHandle,x,y:f64) {
 main :: proc() {
     platform_process_init()
     for arg in os.args[1:] {
+        if arg=="--version" {fmt.println(strings.trim_space(UPDATER_VERSION));return}
+        if arg=="--check-updates" {updater_cli_check();return}
         if arg=="--persistence-service" {
             persistence_headless=true
             persistence_service_main()
@@ -826,6 +845,7 @@ main :: proc() {
     }
     smoke:=false
     show_machines:=false
+    show_updates:=false
     stats:=false
     capture_path:string
     initial_view:=View.Overview
@@ -833,6 +853,7 @@ main :: proc() {
     for arg in os.args[1:] {
         if arg=="--smoke" {smoke=true}
         else if arg=="--machines" {show_machines=true}
+        else if arg=="--updates" {show_updates=true}
         else if arg=="--stats" {stats=true}
         else if arg=="--startup-profile" {startup_profile=true}
         else if arg=="--persistence=on" {persistence_command=1}
@@ -843,7 +864,7 @@ main :: proc() {
         else if arg=="--view=memory"||arg=="--view=mem+disk" {initial_view=.Memory}
         else if arg=="--view=overview" {initial_view=.Overview}
         else if arg=="--help" {
-            fmt.println("task_master: native Odin + Vulkan system monitor\nSpace pause machine | F freeze all graphs | 1-4 views | Ctrl+1-9 / arrows / A D machines | + SSH machines | Esc/Q quit\n--view=overview|cpu|gpu|mem+disk  initial view (memory alias supported)\n--remote=SSH_ALIAS  verify passwordless SSH and connect for this session\n--machines  open the SSH machine picker\n--persistence=on|off  enable or stop background sampling and exit\n--stats  sample telemetry and exit\n--smoke  open the window, sample for 4 seconds, then exit\n--startup-profile  print startup stage timings\n--capture=path.png  save a real GPU-rendered frame and exit")
+            fmt.println("task_master: native Odin + Vulkan system monitor\nSpace pause machine | F freeze all graphs | 1-4 views | Ctrl+1-9 / arrows / A D machines | + SSH machines | Esc/Q quit\n--view=overview|cpu|gpu|mem+disk  initial view (memory alias supported)\n--remote=SSH_ALIAS  verify passwordless SSH and connect for this session\n--machines  open the SSH machine picker\n--persistence=on|off  enable or stop background sampling and exit\n--version  print the embedded release version\n--check-updates  check and stage the latest signed update without opening a window\n--stats  sample telemetry and exit\n--smoke  open the window, sample for 4 seconds, then exit\n--startup-profile  print startup stage timings\n--capture=path.png  save a real GPU-rendered frame and exit")
             return
         }
     }
@@ -903,6 +924,8 @@ main :: proc() {
     stage=startup_stage(stage,"renderer total")
     defer {process_kill_destroy(a.process_kill);a.process_kill=nil;persistence_change_destroy(a);persistence_reader_stop(a);machines_disconnect(a);renderer_destroy(&a.renderer)}
     glfw.SetWindowUserPointer(a.renderer.window,a)
+    updater_init(a,automatic=!smoke)
+    defer updater_destroy(a)
     glfw.SetWindowRefreshCallback(a.renderer.window,refresh_callback)
     glfw.SetFramebufferSizeCallback(a.renderer.window,resize_callback)
     glfw.SetWindowSizeCallback(a.renderer.window,resize_callback)
@@ -910,7 +933,7 @@ main :: proc() {
     glfw.SetScrollCallback(a.renderer.window,scroll_callback)
     glfw.SetCursorPosCallback(a.renderer.window,cursor_callback)
     glfw.SetCharCallback(a.renderer.window,machine_char_callback)
-    glfw.SetKeyCallback(a.renderer.window,machine_key_callback)
+    glfw.SetKeyCallback(a.renderer.window,updater_key_callback)
     glfw.SetMouseButtonCallback(a.renderer.window,mouse_button_callback)
     a.started=glfw.GetTime()
     machines_load(a)
@@ -933,6 +956,7 @@ main :: proc() {
     }
     a.clock_second=time.time_to_unix(time.now())
     if show_machines {machine_dialog_open(a)}
+    if show_updates {a.update_dialog=true;a.machine_dialog=false;a.machine_menu=false}
     draw(a)
     stage=startup_stage(stage,"first draw")
     glfw.ShowWindow(a.renderer.window)
@@ -949,6 +973,7 @@ main :: proc() {
         mx,my=window_ui_position(a,mx,my)
         a.mouse_x,a.mouse_y=f32(mx),f32(my)
         persistence_change_poll(a)
+        updater_poll(a)
         graph_settings_flush(a)
         machines_discovery_poll(a)
         machine_terminal_poll(a)

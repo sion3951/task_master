@@ -67,16 +67,19 @@ graph_smoothing_append :: proc(a:^App,cache:^Graph_Smoothing,slot:int,previous_s
         current.network_rx=previous.network_rx+(raw.network_rx-previous.network_rx)*f64(alpha)
         current.network_tx=previous.network_tx+(raw.network_tx-previous.network_tx)*f64(alpha)
     }
-    pg,rg,g:=&previous.gpu,&raw.gpu,&current.gpu
-    if pg.legacy==rg.legacy {
-        if pg.utilization_available&&rg.utilization_available {g.utilization=pg.utilization+(rg.utilization-pg.utilization)*alpha}
-        if pg.memory_available&&rg.memory_available&&pg.memory_total==rg.memory_total {
-            g.memory_used=graph_smoothing_bytes(pg.memory_used,rg.memory_used,alpha)
-            g.memory_percent=pg.memory_percent+(rg.memory_percent-pg.memory_percent)*alpha
-        }
-        if pg.power_available&&rg.power_available {g.power_watts=pg.power_watts+(rg.power_watts-pg.power_watts)*alpha}
-        if pg.frequency_available&&rg.frequency_available {g.frequency_mhz=pg.frequency_mhz+(rg.frequency_mhz-pg.frequency_mhz)*alpha}
+    for index in 0..<raw.gpu_count {
+        if index>=previous.gpu_count {continue}
+        graph_smoothing_gpu(&current.gpus[index],&previous.gpus[index],&raw.gpus[index],alpha)
     }
+    if same_topology {
+        for &power in current.cpu_package_power[:current.cpu_package_power_count] {
+            for old in previous.cpu_package_power[:previous.cpu_package_power_count] {
+                if old.package_id==power.package_id&&old.available&&power.available {power.watts=old.watts+(power.watts-old.watts)*alpha;break}
+            }
+        }
+    }
+    pg,rg:=&previous.gpu,&raw.gpu
+    graph_smoothing_gpu(&current.gpu,pg,rg,alpha)
     // Overview uses normalized values, but shares the same filter cadence and
     // availability boundaries as the detailed plots.
     available:=[4]bool{same_topology,pg.utilization_available&&rg.utilization_available,
@@ -118,4 +121,16 @@ graph_smoothing_prepare :: proc(a:^App)->^Graph_Smoothing {
 
 graph_plot_sample :: proc(a:^App,slot:int)->^CPU_Sample {
     return &a.graph_smoothing.cpu_history[slot]
+}
+
+graph_smoothing_gpu :: proc(g,pg,rg:^GPU_Sample,alpha:f32) {
+    if pg.legacy==rg.legacy {
+        if pg.utilization_available&&rg.utilization_available {g.utilization=pg.utilization+(rg.utilization-pg.utilization)*alpha}
+        if pg.memory_available&&rg.memory_available&&pg.memory_total==rg.memory_total {
+            g.memory_used=graph_smoothing_bytes(pg.memory_used,rg.memory_used,alpha)
+            g.memory_percent=pg.memory_percent+(rg.memory_percent-pg.memory_percent)*alpha
+        }
+        if pg.power_available&&rg.power_available {g.power_watts=pg.power_watts+(rg.power_watts-pg.power_watts)*alpha}
+        if pg.frequency_available&&rg.frequency_available {g.frequency_mhz=pg.frequency_mhz+(rg.frequency_mhz-pg.frequency_mhz)*alpha}
+    }
 }

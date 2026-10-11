@@ -276,11 +276,15 @@ persistence_reader_worker :: proc(reader:^Persistence_Reader) {
                                         ram_available=sample.ram_available,rates_ready=sample.rates_ready,network_rates_ready=sample.network_rates_ready}
                                     copy(destination.cores[:],sample.cores);copy(destination.logical[:],sample.logical)
                                     destination.gpu=gpu_cache_sample(sample,result.metrics,cache.snapshot!=""&&sample.timestamp==cache.sampled_at)
+                                    history_device_cache(destination,sample)
                                     for kind in 0..<4 {result.history[kind][i]=sample.overview[kind]}
                                 }
                                 if cache.snapshot!=""&&result.history_count>0 {
                                     latest:=&result.cpu_history[result.history_count-1]
-                                    if latest.timestamp==cache.sampled_at {history_memory_sample(latest,result.metrics)}
+                                    if latest.timestamp==cache.sampled_at {
+                                        history_memory_sample(latest,result.metrics)
+                                        if latest.gpu_count==0 {history_device_sample(latest,result.metrics)}
+                                    }
                                 }
                             }
                         }
@@ -302,7 +306,7 @@ persistence_reader_worker :: proc(reader:^Persistence_Reader) {
     }
 }
 
-persistence_reader_history_apply :: proc(reader:^Persistence_Reader,state:^Machine_State,result:^Persistence_Read_Result) {
+persistence_reader_history_apply :: proc(reader:^Persistence_Reader,state:^Machine_State,result:^Persistence_Read_Result,exclude_after:f64=0,exclude_before:f64=0) {
     // Cache merges can enrich fields at an unchanged timestamp as well as add
     // samples; filtered display data must be rebuilt from that updated source.
     if state.graph_smoothing!=nil {state.graph_smoothing.initialized=false}
@@ -325,6 +329,9 @@ persistence_reader_history_apply :: proc(reader:^Persistence_Reader,state:^Machi
         matched_old_slot:=-1
         if use_new {
             timestamp=result.cpu_history[new_index].timestamp
+            // The desktop owns this interval while a boot-time service waits
+            // for its devices. Interleaving both samplers breaks GPU traces.
+            if exclude_after>0&&timestamp>=exclude_after&&(exclude_before==0||timestamp<exclude_before) {new_index+=1;continue}
             if old_index<state.history_count&&timestamp==state.cpu_history[slot].timestamp {matched_old_slot=slot;old_index+=1}
         }
         keep:=timestamp>=latest-HISTORY_SECONDS
@@ -362,6 +369,7 @@ persistence_reader_history_apply :: proc(reader:^Persistence_Reader,state:^Machi
                         scratch.cpu_history[destination].polling_seconds=state.cpu_history[matched_old_slot].polling_seconds
                     }
                     history_memory_copy(&scratch.cpu_history[destination],&state.cpu_history[matched_old_slot])
+                    history_device_copy(&scratch.cpu_history[destination],&state.cpu_history[matched_old_slot])
                 }
                 for kind in 0..<4 {scratch.history[kind][destination]=result.history[kind][new_index]}
             } else {
@@ -433,7 +441,9 @@ persistence_reader_poll_mode :: proc(a:^App,now:f64,live:bool) {
                         m.state.process_revision+=1
                         m.has_sample=true
                     }
-                    persistence_reader_history_apply(reader,m.state,result)
+                    if m==a.local_machine&&(persistence_local_handoff_pending||persistence_local_handoff_completed_at>0) {
+                        persistence_reader_history_apply(reader,m.state,result,persistence_local_handoff_after,persistence_local_handoff_completed_at)
+                    } else {persistence_reader_history_apply(reader,m.state,result)}
                     io_summary_apply(m.state,result.io_summary)
                     persistence_reader_stamp_set(m,live,result.written_at)
                     a.dirty=true

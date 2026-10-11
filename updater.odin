@@ -1,0 +1,403 @@
+package main
+
+import "core:crypto/ed25519"
+import "core:crypto/sha2"
+import "core:encoding/json"
+import "core:fmt"
+import "core:io"
+import "core:os"
+import "core:path/filepath"
+import "core:strings"
+import "core:sync"
+import "core:thread"
+import "core:time"
+
+
+UPDATER_VERSION :: #config(TASK_MASTER_VERSION,string(#load("VERSION")))
+UPDATER_PUBLIC_KEY :: string(#load("assets/update-public-key.hex"))
+UPDATER_REPOSITORY :: "https://github.com/sion3951/task_master/releases/download/"
+UPDATER_INTERVAL :: 6*60*60
+UPDATER_MAX_PACKAGE :: i64(1024*1024*1024)
+
+Update_State :: enum {Idle,Checking,Downloading,Ready,Current,Error}
+Update_Target :: struct {
+    os,arch,kind,executable,portable_path:string,
+    sha256:string,
+    size:i64,
+}
+Update_Asset :: struct {
+    os,arch,kind,name,sha256,url:string,
+    size:i64,
+}
+Update_Manifest :: struct {schema:int,version:string,assets:[]Update_Asset}
+Update_GitHub_Asset :: struct {name,browser_download_url:string}
+Update_GitHub_Release :: struct {tag_name:string,draft,prerelease:bool,assets:[]Update_GitHub_Asset}
+Update_Settings :: struct {automatic:bool,last_checked:f64}
+Updater :: struct {
+    state:Update_State,
+    message,version,package_path,stage:string,
+    target:Update_Target,
+    automatic,allow_automatic,handed_off:bool,
+    last_checked,created_at:f64,
+    directory:string,
+    job:^Update_Job,
+    worker:^thread.Thread,
+}
+// Everything touched by the worker is separately owned. The UI only observes
+// the atomic flags until completion publishes the result with release/acquire.
+Update_Job :: struct {
+    stop,done,downloading:bool,
+    target:Update_Target,
+    directory,stage,message,version,package_path:string,
+    state:Update_State,
+}
+
+updater_target_clone :: proc(t:Update_Target)->Update_Target {
+    return {os=strings.clone(t.os),arch=strings.clone(t.arch),kind=strings.clone(t.kind),
+        executable=strings.clone(t.executable),portable_path=strings.clone(t.portable_path),
+        sha256=strings.clone(t.sha256),size=t.size}
+}
+updater_target_destroy :: proc(t:^Update_Target) {
+    delete(t.os);delete(t.arch);delete(t.kind);delete(t.executable);delete(t.portable_path);delete(t.sha256)
+    t^={}
+}
+updater_message :: proc(u:^Updater,message:string) {delete(u.message);u.message=strings.clone(message)}
+updater_settings_save :: proc(u:^Updater) {
+    if u.directory=="" {return}
+    data,err:=json.marshal(Update_Settings{automatic=u.automatic,last_checked=u.last_checked},allocator=context.temp_allocator)
+    if err==nil {_=persistence_atomic_write(fmt.tprintf("%s/settings.json",u.directory),data)}
+}
+updater_set_automatic :: proc(a:^App,enabled:bool) {
+    if a.updater==nil {return}
+    a.updater.automatic=enabled
+    updater_settings_save(a.updater)
+    a.dirty=true
+}
+// Read only bounded regular files, including before parsing untrusted metadata.
+updater_read_bounded :: proc(path:string,limit:i64,allocator:=context.allocator)->([]u8,bool) {
+    file,err:=os.open(path)
+    if err!=nil {return nil,false}
+    defer os.close(file)
+    size,se:=os.file_size(file)
+    if se!=nil||size<0||size>limit {return nil,false}
+    data:=make([]u8,int(size),allocator)
+    used:=0
+    for used<len(data) {
+        count,re:=os.read(file,data[used:])
+        if re!=nil||count<=0 {delete(data,allocator);return nil,false}
+        used+=count
+    }
+    return data,true
+}
+updater_init :: proc(a:^App,automatic:bool=true) {
+    if a.updater!=nil {return}
+    u:=new(Updater)
+    a.updater=u
+    u.automatic=true;u.allow_automatic=automatic;u.created_at=persistence_wall_time()
+    base,err:=os.user_cache_dir(context.temp_allocator)
+    if err!=nil {updater_message(u,"Could not find the update cache directory.");return}
+    u.directory=strings.clone(fmt.tprintf("%s/task_master/updates",base))
+    if os.mkdir_all(u.directory,{.Read_User,.Write_User,.Execute_User})!=nil||!platform_private_path(u.directory,true) {
+        updater_message(u,"Could not create the private update cache directory.");return
+    }
+    settings:=Update_Settings{automatic=true}
+    if data,ok:=updater_read_bounded(fmt.tprintf("%s/settings.json",u.directory),4096,context.temp_allocator);ok {
+        if json.unmarshal(data,&settings,allocator=context.temp_allocator)==nil {
+            u.automatic=settings.automatic
+            now:=persistence_wall_time()
+            if settings.last_checked>0&&settings.last_checked<=now {u.last_checked=settings.last_checked}
+        }
+    }
+    result_path:=fmt.tprintf("%s/install-result.txt",u.directory)
+    if data,ok:=updater_read_bounded(result_path,8192,context.temp_allocator);ok {
+        result:=strings.trim_space(string(data))
+        if strings.has_prefix(result,"success\n")||result=="success" {
+            u.state=.Current;updater_message(u,"Update installed successfully.")
+        } else {u.state=.Error;updater_message(u,result)}
+        _=os.remove(result_path)
+    }
+}
+updater_release_stage :: proc(u:^Updater) {
+    if u.stage!=""&&!u.handed_off {_=os.remove_all(u.stage)}
+    delete(u.stage);delete(u.package_path);delete(u.version)
+    u.stage="";u.package_path="";u.version=""
+    updater_target_destroy(&u.target)
+}
+updater_check :: proc(a:^App) {
+    u:=a.updater
+    if u==nil||u.job!=nil||u.handed_off {return}
+    if u.directory=="" {u.state=.Error;updater_message(u,"Update cache is unavailable.");a.dirty=true;return}
+    target,error:=updater_platform_target()
+    if error!="" {u.state=.Error;updater_message(u,error);a.dirty=true;return}
+    updater_release_stage(u)
+    job:=new(Update_Job)
+    job.target=updater_target_clone(target)
+    job.directory=strings.clone(u.directory)
+    job.stage=strings.clone(fmt.tprintf("%s/stage-%d-%d",u.directory,os.get_pid(),time.to_unix_nanoseconds(time.now())))
+    u.state=.Checking;updater_message(u,"Checking GitHub for updates…")
+    u.last_checked=persistence_wall_time();updater_settings_save(u)
+    u.job=job
+    u.worker=thread.create_and_start_with_poly_data(job,updater_worker,name="Automatic updates")
+    if u.worker==nil {
+        job.state=.Error;job.message=strings.clone("Could not start the update worker.")
+        sync.atomic_store(&job.done,true)
+    }
+    a.dirty=true
+}
+updater_job_destroy :: proc(job:^Update_Job,retain_stage:bool=false) {
+    if job==nil {return}
+    if !retain_stage&&job.stage!="" {_=os.remove_all(job.stage)}
+    updater_target_destroy(&job.target)
+    delete(job.directory);delete(job.stage);delete(job.message);delete(job.version);delete(job.package_path)
+    free(job)
+}
+updater_poll :: proc(a:^App) {
+    u:=a.updater
+    if u==nil {return}
+    job:=u.job
+    if job!=nil {
+        if !sync.atomic_load(&job.done) {
+            if u.state==.Checking&&sync.atomic_load(&job.downloading) {
+                u.state=.Downloading;updater_message(u,"Downloading and verifying the update…");a.dirty=true
+            }
+            return
+        }
+        if u.worker!=nil {thread.join(u.worker);thread.destroy(u.worker);u.worker=nil}
+        u.state=job.state
+        updater_message(u,job.message)
+        u.version=job.version;job.version=""
+        if job.state==.Ready {
+            u.stage=job.stage;job.stage=""
+            u.package_path=job.package_path;job.package_path=""
+            u.target=job.target;job.target={}
+        }
+        updater_job_destroy(job);u.job=nil;a.dirty=true
+        return
+    }
+    now:=persistence_wall_time()
+    if u.allow_automatic&&u.automatic&&u.state!=.Ready&&!u.handed_off&&now-u.created_at>=10&&now-u.last_checked>=UPDATER_INTERVAL {
+        // A source checkout does not silently install a system package.
+        _,error:=updater_platform_target()
+        if error!="" {u.last_checked=now;updater_settings_save(u);return}
+        updater_check(a)
+    }
+}
+updater_destroy :: proc(a:^App) {
+    u:=a.updater
+    if u==nil {return}
+    if u.job!=nil {
+        sync.atomic_store(&u.job.stop,true)
+        if u.worker!=nil {thread.join(u.worker);thread.destroy(u.worker)}
+        updater_job_destroy(u.job)
+    }
+    updater_release_stage(u)
+    delete(u.directory);delete(u.message);free(u);a.updater=nil
+}
+
+// Stable releases only, with numeric comparison (1.10.0 > 1.9.0).
+updater_version_parse :: proc(input:string)->([3]u64,bool) {
+    value:=strings.trim_space(input)
+    if strings.has_prefix(value,"v") {value=value[1:]}
+    if at:=strings.index(value,"+");at>=0 {
+        metadata:=value[at+1:]
+        if len(metadata)==0||metadata[0]=='.'||metadata[len(metadata)-1]=='.'||strings.contains(metadata,"..") {return {},false}
+        for c in transmute([]u8)metadata {
+            if !((c>='0'&&c<='9')||(c>='A'&&c<='Z')||(c>='a'&&c<='z')||c=='-'||c=='.') {return {},false}
+        }
+        value=value[:at]
+    }
+    parts:=strings.split(value,".",context.temp_allocator)
+    result:[3]u64
+    if len(parts)!=3 {return result,false}
+    for part,i in parts {
+        if len(part)==0||len(part)>18||(len(part)>1&&part[0]=='0') {return result,false}
+        for c in transmute([]u8)part {if c<'0'||c>'9' {return result,false};result[i]=result[i]*10+u64(c-'0')}
+    }
+    return result,true
+}
+updater_version_newer :: proc(candidate,current:string)->(bool,bool) {
+    remote,rok:=updater_version_parse(candidate)
+    local_value:=strings.trim_space(current)
+    if at:=strings.index(local_value,"+");at>=0 {local_value=local_value[:at]}
+    prerelease:=false
+    if at:=strings.index(local_value,"-");at>=0 {
+        if at==len(local_value)-1 {return false,false}
+        prerelease=true;local_value=local_value[:at]
+    }
+    local,lok:=updater_version_parse(local_value)
+    if !rok||!lok {return false,false}
+    for i in 0..<3 {if remote[i]!=local[i] {return remote[i]>local[i],true}}
+    return prerelease,true
+}
+updater_hex :: proc(input:string,out:[]u8)->bool {
+    value:=strings.trim_space(input)
+    if len(value)!=len(out)*2 {return false}
+    for &byte,i in out {
+        v:u8
+        for c in transmute([]u8)value[i*2:i*2+2] {
+            v*=16
+            if c>='0'&&c<='9' {v+=c-'0'} else if c>='a'&&c<='f' {v+=c-'a'+10} else {return false}
+        }
+        byte=v
+    }
+    return true
+}
+updater_url_component :: proc(value:string)->string {
+    builder:=strings.builder_make(context.temp_allocator)
+    digits:="0123456789ABCDEF"
+    for c in transmute([]u8)value {
+        if (c>='0'&&c<='9')||(c>='A'&&c<='Z')||(c>='a'&&c<='z')||c=='-'||c=='_'||c=='.'||c=='~' {
+            strings.write_byte(&builder,c)
+        } else {
+            strings.write_byte(&builder,'%');strings.write_byte(&builder,digits[c>>4]);strings.write_byte(&builder,digits[c&15])
+        }
+    }
+    return strings.to_string(builder)
+}
+updater_release_url :: proc(url,tag,name:string)->bool {
+    if name==""||len(name)>240||strings.contains_any(name,"/\\\r\n\t?#%")||name=="."||name==".." {return false}
+    // The release publisher escapes '+' in SemVer build metadata. GitHub may
+    // return its equivalent unescaped URL in discovery metadata.
+    canonical:=fmt.tprintf("%s%s/%s",UPDATER_REPOSITORY,updater_url_component(tag),updater_url_component(name))
+    return url==canonical||url==fmt.tprintf("%s%s/%s",UPDATER_REPOSITORY,tag,name)
+}
+updater_verify_package :: proc(path:string,size:i64,expected:string,job:^Update_Job=nil)->bool {
+    digest,wanted:[32]u8
+    if size<=0||size>UPDATER_MAX_PACKAGE||!updater_hex(expected,wanted[:]) {return false}
+    file,err:=os.open(path)
+    if err!=nil {return false}
+    defer os.close(file)
+    actual,se:=os.file_size(file)
+    if se!=nil||actual!=size {return false}
+    hash:sha2.Context_256
+    sha2.init_256(&hash)
+    // SHA2 selects the host CPU's accelerated implementation when supported.
+    buffer:=make([]u8,1024*1024)
+    defer delete(buffer)
+    total:i64
+    for {
+        if job!=nil&&sync.atomic_load(&job.stop) {return false}
+        count,re:=os.read(file,buffer)
+        if re!=nil&&re!=io.Error.EOF {return false}
+        if count==0 {break}
+        total+=i64(count)
+        if total>size {return false}
+        sha2.update(&hash,buffer[:count])
+    }
+    sha2.final(&hash,digest[:])
+    return total==size&&digest==wanted
+}
+// AppImages bundle curl; other installs use the native OS or package dependency.
+// No shell interpolation; redirects remain HTTPS with bounded size/time.
+updater_fetch :: proc(job:^Update_Job,url,path:string,limit:i64)->bool {
+    curl:="curl"
+    if job.target.os=="linux"&&job.target.kind=="appimage" {
+        bundled:=fmt.tprintf("%s/curl",filepath.dir(job.target.executable))
+        if os.is_file(bundled) {curl=bundled}
+    }
+    when ODIN_OS==.Windows {curl="curl.exe"}
+    command:=[]string{curl,"--fail","--silent","--show-error","--location","--max-redirs","4",
+        "--proto","=https","--proto-redir","=https","--connect-timeout","10","--max-time","300",
+        "--speed-time","30","--speed-limit","1024","--max-filesize",fmt.tprintf("%d",limit),
+        "--user-agent","task_master-updater","--output",path,"--",url}
+    if sync.atomic_load(&job.stop) {return false}
+    child:os.Process
+    err:os.Error
+    child_job:uintptr
+    sync.mutex_lock(&remote_spawn_mutex)
+    when ODIN_OS==.Windows {child,child_job,err=updater_windows_fetch_start(command)}
+    else {child,err=os.process_start({command=command})}
+    sync.mutex_unlock(&remote_spawn_mutex)
+    if err!=nil {return false}
+    defer updater_fetch_process_close(child_job)
+    started:=time.tick_now()
+    for {
+        if sync.atomic_load(&job.stop)||time.tick_since(started)>310*time.Second {
+            _=os.process_kill(child);_,_=os.process_wait(child,2*time.Second);_=os.remove(path);return false
+        }
+        // Also cap responses lacking Content-Length on older curl versions.
+        if file,open_error:=os.open(path);open_error==nil {
+            size,_:=os.file_size(file);_=os.close(file)
+            if size>limit {_=os.process_kill(child);_,_=os.process_wait(child,2*time.Second);_=os.remove(path);return false}
+        }
+        state,wait_error:=os.process_wait(child,100*time.Millisecond)
+        if wait_error==.Timeout {continue}
+        if wait_error!=nil||!state.exited||state.exit_code!=0 {_=os.remove(path);return false}
+        return platform_private_path(path,false)
+    }
+}
+updater_fetch_process_close :: proc(child_job:uintptr) {
+    when ODIN_OS==.Windows {updater_windows_fetch_close(child_job)}
+}
+updater_fail :: proc(job:^Update_Job,message:string) {job.state=.Error;job.message=strings.clone(message)}
+updater_worker :: proc(job:^Update_Job) {
+    defer {
+        sync.atomic_store(&job.done,true)
+        if !persistence_headless&&!sync.atomic_load(&job.stop) {app_wake()}
+    }
+    if os.make_directory(job.stage,{.Read_User,.Write_User,.Execute_User})!=nil||!platform_private_path(job.stage,true) {
+        updater_fail(job,"Could not create the update download directory.");return
+    }
+    api_path:=fmt.tprintf("%s/release.json",job.stage)
+    if !updater_fetch(job,"https://api.github.com/repos/sion3951/task_master/releases/latest",api_path,1024*1024) {
+        updater_fail(job,"Could not check GitHub. Check your connection and that curl is installed, then try again.");return
+    }
+    release_bytes,read_ok:=updater_read_bounded(api_path,1024*1024,context.temp_allocator)
+    release:Update_GitHub_Release
+    if !read_ok||json.unmarshal(release_bytes,&release,allocator=context.temp_allocator)!=nil||release.draft||release.prerelease {
+        updater_fail(job,"GitHub returned invalid stable release metadata.");return
+    }
+    newer,valid:=updater_version_newer(release.tag_name,UPDATER_VERSION)
+    if !valid {updater_fail(job,"The release or installed version is not a supported stable semantic version.");return}
+    if !newer {job.state=.Current;job.message=strings.clone("You are running the latest version.");return}
+    manifest_url,signature_url:="",""
+    for asset in release.assets {
+        if asset.name=="update.json"&&updater_release_url(asset.browser_download_url,release.tag_name,asset.name) {manifest_url=asset.browser_download_url}
+        if asset.name=="update.json.sig"&&updater_release_url(asset.browser_download_url,release.tag_name,asset.name) {signature_url=asset.browser_download_url}
+    }
+    if manifest_url==""||signature_url=="" {updater_fail(job,"This release has no signed update metadata yet. Install it from GitHub manually.");return}
+    manifest_path:=fmt.tprintf("%s/update.json",job.stage)
+    signature_path:=fmt.tprintf("%s/update.json.sig",job.stage)
+    if !updater_fetch(job,manifest_url,manifest_path,65536)||!updater_fetch(job,signature_url,signature_path,64) {
+        updater_fail(job,"Could not download the signed update metadata.");return
+    }
+    manifest_bytes,mok:=updater_read_bounded(manifest_path,65536,context.temp_allocator)
+    signature,sok:=updater_read_bounded(signature_path,64,context.temp_allocator)
+    key_bytes:[32]u8
+    key:ed25519.Public_Key
+    if !mok||!sok||len(signature)!=64||!updater_hex(UPDATER_PUBLIC_KEY,key_bytes[:])||
+        !ed25519.public_key_set_bytes(&key,key_bytes[:])||!ed25519.verify(&key,manifest_bytes,signature) {
+        updater_fail(job,"Update signature verification failed. Nothing was installed.");return
+    }
+    manifest:Update_Manifest
+    if json.unmarshal(manifest_bytes,&manifest,allocator=context.temp_allocator)!=nil||manifest.schema!=1||
+        strings.trim_prefix(release.tag_name,"v")!=manifest.version {
+        updater_fail(job,"The signed update manifest is invalid or belongs to a different release.");return
+    }
+    asset:Update_Asset
+    found:=false
+    for candidate in manifest.assets {
+        if candidate.os==job.target.os&&candidate.arch==job.target.arch&&candidate.kind==job.target.kind {
+            if found {updater_fail(job,"The update manifest contains ambiguous platform packages.");return}
+            asset=candidate;found=true
+        }
+    }
+    wanted:[32]u8
+    if !found {updater_fail(job,"This release has no package for your platform and installation format.");return}
+    if asset.size<=0||asset.size>UPDATER_MAX_PACKAGE||!updater_hex(asset.sha256,wanted[:])||
+        !updater_release_url(asset.url,release.tag_name,asset.name) {
+        updater_fail(job,"The signed update package metadata is invalid.");return
+    }
+    sync.atomic_store(&job.downloading,true)
+    package_path:=fmt.tprintf("%s/%s",job.stage,asset.name)
+    if !updater_fetch(job,asset.url,package_path,asset.size) {
+        updater_fail(job,"The update download failed. Check your connection and available disk space, then try again.");return
+    }
+    if !updater_verify_package(package_path,asset.size,asset.sha256,job) {
+        updater_fail(job,"The downloaded update did not match its signed size and checksum. Nothing was installed.");return
+    }
+    job.state=.Ready;job.version=strings.clone(manifest.version)
+    job.package_path=strings.clone(package_path)
+    job.target.sha256=strings.clone(asset.sha256);job.target.size=asset.size
+    job.message=strings.clone(fmt.tprintf("Version %s is downloaded and verified. Restart to install.",manifest.version))
+}

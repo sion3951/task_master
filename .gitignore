@@ -8,6 +8,7 @@ sensors/windows/obj/
 .agents/
 .codex/
 .aws/
+.update-signing/
 .env
 .env.*
 !.env.example

@@ -112,6 +112,7 @@ for target_arch in $architectures; do
     set -- "$odin" build . "-target:darwin_$target_arch" -minimum-os-version:13.0 \
         "-out:$bundle/Contents/MacOS/task_master" -o:speed -no-bounds-check -vet \
         -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 \
+        "-define:TASK_MASTER_VERSION=$version" \
         "-collection:task_master_freetype=$(dirname "$free_type")" \
         "-define:FREETYPE_LIBRARY=task_master_freetype:$(basename "$free_type")" \
         '-extra-linker-flags:-Wl,-headerpad_max_install_names'

@@ -7,6 +7,7 @@ import "core:time"
 // Keep that sampler live until a current service snapshot can take ownership.
 persistence_local_handoff_pending: bool
 persistence_local_handoff_after: f64
+persistence_local_handoff_completed_at: f64
 
 persistence_local_startup :: proc(a: ^App) {
     local := a.local_machine
@@ -25,6 +26,7 @@ persistence_local_handoff_start :: proc(a: ^App) {
         persistence_local_captured = true
     }
     persistence_local_handoff_pending = true
+    persistence_local_handoff_completed_at = 0
     persistence_local_handoff_after = persistence_wall_time()-time.duration_seconds(time.tick_since(local.metrics._sample_started))
 }
 
@@ -40,6 +42,7 @@ persistence_local_snapshot_ready :: proc(a: ^App, m: ^Machine, result: ^Persiste
         return false
     }
     persistence_local_handoff_pending = false
+    persistence_local_handoff_completed_at = result.sampled_at
     m.state.history_handoff_pending = false
     metrics_suspend_devices(&m.state.metrics)
     if startup_profile {

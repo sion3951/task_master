@@ -34,6 +34,8 @@ Persistence_Sample :: struct {
     logical: []f32,
     overview: [4]f32,
     gpu: GPU_Sample,
+    gpus: []GPU_Sample,
+    cpu_package_power: []CPU_Package_Power,
 }
 Persistence_Cache :: struct {
     version: int,
@@ -194,7 +196,7 @@ persistence_cache_read :: proc(m:^Machine,live:bool=false)->(cache:Persistence_C
         int(cache.status)<0||int(cache.status)>int(Connection_Status.Saved) {return}
     previous:f64=0
     for s in cache.samples {
-        if !remote_nonnegative(s.timestamp)||s.timestamp<previous||len(s.cores)>256||len(s.logical)>256||
+        if !remote_nonnegative(s.timestamp)||s.timestamp<previous||len(s.cores)>256||len(s.logical)>256||len(s.gpus)>8||len(s.cpu_package_power)>16||
             !remote_nonnegative(s.polling_seconds)||s.polling_seconds>10||
             !remote_nonnegative(s.lower)||!remote_nonnegative(s.upper)||s.lower>s.upper||s.upper>100||
             !remote_nonnegative(s.threads)||s.threads>100||!remote_nonnegative(s.frequency_mhz)||!remote_nonnegative(s.power_watts)||
@@ -204,11 +206,9 @@ persistence_cache_read :: proc(m:^Machine,live:bool=false)->(cache:Persistence_C
         if s.memory_free>s.memory_total||s.memory_cached>s.memory_total||s.memory_buffers>s.memory_total {return}
         for x in s.logical {if !remote_nonnegative(x)||x>100 {return}}
         for x in s.overview {if !remote_nonnegative(x)||x>100 {return}}
-        if !remote_nonnegative(s.gpu.utilization)||s.gpu.utilization>100||
-            !remote_nonnegative(s.gpu.memory_percent)||s.gpu.memory_percent>100||
-            !remote_nonnegative(s.gpu.power_watts)||!remote_nonnegative(s.gpu.frequency_mhz)||!remote_nonnegative(s.gpu.temperature)||
-            !remote_nonnegative(s.gpu.power_max_watts)||s.gpu.power_max_available&&s.gpu.power_max_watts<=0||
-            !remote_nonnegative(s.gpu.fan_percent)||s.gpu.fan_percent>100||s.gpu.memory_used>s.gpu.memory_total {return}
+        if !gpu_sample_valid(s.gpu) {return}
+        for gpu in s.gpus {if !gpu_sample_valid(gpu) {return}}
+        for power in s.cpu_package_power {if power.package_id<0||!remote_nonnegative(power.watts) {return}}
         for c in s.cores {if !remote_nonnegative(c.lower)||!remote_nonnegative(c.upper)||c.lower>c.upper||c.upper>100||!remote_nonnegative(c.frequency_mhz) {return}}
         previous=s.timestamp
     }
@@ -246,6 +246,7 @@ persistence_cache_apply :: proc(a:^App,m:^Machine,cache:Persistence_Cache,restor
             ram_available=s.ram_available,rates_ready=s.rates_ready,network_rates_ready=s.network_rates_ready}
         copy(sample.cores[:],s.cores);copy(sample.logical[:],s.logical)
         sample.gpu=gpu_cache_sample(s,&state.metrics,restore_snapshot&&cache.snapshot!=""&&s.timestamp==cache.sampled_at)
+        history_device_cache(sample,s)
         for kind in 0..<4 {state.history[kind][i]=s.overview[kind]}
         if s.timestamp==pinned {state.cpu_pinned_slot=i}
         if s.timestamp==gpu_pinned {state.gpu_pinned_slot=i}
@@ -254,7 +255,10 @@ persistence_cache_apply :: proc(a:^App,m:^Machine,cache:Persistence_Cache,restor
     state.history_count=len(cache.samples);state.history_next=len(cache.samples)%HISTORY_CAPACITY
     if restore_snapshot&&cache.snapshot!=""&&state.history_count>0 {
         latest:=&state.cpu_history[state.history_count-1]
-        if latest.timestamp==cache.sampled_at {history_memory_sample(latest,&state.metrics)}
+        if latest.timestamp==cache.sampled_at {
+            history_memory_sample(latest,&state.metrics)
+            if latest.gpu_count==0 {history_device_sample(latest,&state.metrics)}
+        }
     }
     m.has_sample=cache.snapshot!=""
     m.status=cache.status;m.message_len=copy(m.message[:],cache.message)
@@ -336,6 +340,8 @@ persistence_cache_write :: proc(a:^App,m:^Machine,live:bool=false)->bool {
             ram_available=source.ram_available,rates_ready=source.rates_ready,network_rates_ready=source.network_rates_ready}
         for kind in 0..<4 {destination.overview[kind]=state.history[kind][slot]}
         destination.gpu=source.gpu
+        destination.gpus=source.gpus[:source.gpu_count]
+        destination.cpu_package_power=source.cpu_package_power[:source.cpu_package_power_count]
     }
     sampled_at:f64=0
     if len(samples)>0 {sampled_at=samples[len(samples)-1].timestamp}

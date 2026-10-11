@@ -222,7 +222,7 @@ jobs:
           retention-days: 30
 
   release:
-    name: Attach installers to tagged release
+    name: Sign updater manifest and publish complete tagged release
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [packages, windows-package, macos-package]
     runs-on: ubuntu-22.04
@@ -235,7 +235,23 @@ jobs:
           pattern: "*-packages*"
           merge-multiple: true
           path: packages
-      - name: Publish packages and combined checksums
+      - name: Sign update manifest with the pinned release key
+        env:
+          TASK_MASTER_UPDATE_PRIVATE_KEY: ${{ secrets.TASK_MASTER_UPDATE_PRIVATE_KEY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$TASK_MASTER_UPDATE_PRIVATE_KEY" ]; then
+            echo 'Set the TASK_MASTER_UPDATE_PRIVATE_KEY repository secret before publishing releases.' >&2
+            exit 1
+          fi
+          signing_dir=$(mktemp -d)
+          trap 'rm -rf "$signing_dir"' EXIT
+          umask 077
+          printf '%s\n' "$TASK_MASTER_UPDATE_PRIVATE_KEY" > "$signing_dir/private.pem"
+          unset TASK_MASTER_UPDATE_PRIVATE_KEY
+          python3 scripts/update-manifest.py --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --packages packages --private-key "$signing_dir/private.pem"
+      - name: Upload all assets to a draft, then publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -243,12 +259,26 @@ jobs:
         run: |
           cd packages
           sha256sum *.AppImage *.deb *.exe *.pkg > SHA256SUMS
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          version=${RELEASE_TAG#v}
+          numeric_version=${version%%+*}
+          prerelease=false
+          case "$numeric_version" in *-*) prerelease=true ;; esac
+          if existing_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$existing_draft" != true ]; then
+              echo 'This release is already published; refusing to replace live updater assets.' >&2
+              exit 1
+            fi
+          else
             notes="$GITHUB_WORKSPACE/docs/releases/$RELEASE_TAG.md"
             if [ -f "$notes" ]; then
-              gh release create "$RELEASE_TAG" --verify-tag --notes-file "$notes" --title "task_master $RELEASE_TAG"
+              gh release create "$RELEASE_TAG" --draft --prerelease="$prerelease" --verify-tag --notes-file "$notes" --title "task_master $RELEASE_TAG"
             else
-              gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "task_master $RELEASE_TAG"
+              gh release create "$RELEASE_TAG" --draft --prerelease="$prerelease" --verify-tag --generate-notes --title "task_master $RELEASE_TAG"
             fi
           fi
-          gh release upload "$RELEASE_TAG" --clobber *.AppImage *.deb *.exe *.pkg SHA256SUMS
+          gh release upload "$RELEASE_TAG" --clobber *.AppImage *.deb *.exe *.pkg SHA256SUMS update.json update.json.sig
+          if [ "$prerelease" = true ]; then
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest
+          fi

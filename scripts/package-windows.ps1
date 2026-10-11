@@ -41,6 +41,8 @@ try {
             throw "Incomplete Windows package: missing or empty $required"
         }
     }
+    # Standalone packaging also prepares and verifies the offline driver payload.
+    & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory (Join-Path $source 'sensors') -PrepareDriverOnly
     $output = [IO.Path]::GetFullPath($OutputDirectory)
     New-Item -ItemType Directory -Force -Path $output | Out-Null
     $setup = Join-Path $output "task_master-$Version-windows-x64-setup.exe"

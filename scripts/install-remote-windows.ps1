@@ -21,8 +21,16 @@ try {
     Move-Item -LiteralPath $temporary -Destination $target -Force
 } finally { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'sensors.zip')) {
-    Expand-Archive -LiteralPath (Join-Path $PSScriptRoot 'sensors.zip') -DestinationPath (Join-Path $PSScriptRoot 'sensors') -Force
-    & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory (Join-Path $PSScriptRoot 'sensors')
+    # Extract through .NET directly instead of PowerShell work for every DLL.
+    # A fresh directory supports retries without overwrite or stale-file issues.
+    $sensors = Join-Path $PSScriptRoot ('sensors-' + [guid]::NewGuid())
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory((Join-Path $PSScriptRoot 'sensors.zip'), $sensors)
+        & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory $sensors
+    } finally {
+        if (Test-Path -LiteralPath $sensors) { Remove-Item -LiteralPath $sensors -Recurse -Force }
+    }
 } elseif (-not (Get-Service -Name task_master_sensors -ErrorAction SilentlyContinue)) {
     throw 'Collector installed, but this development build has no Windows sensor payload. Use a complete release build and retry to install power/clock sensors.'
 }

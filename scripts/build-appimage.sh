@@ -20,7 +20,7 @@ case "$version" in [0-9]*) ;; *) echo 'Version must start with a digit.' >&2; ex
 case "$version" in *[!0-9A-Za-z.+~\-]*) echo 'Invalid version.' >&2; exit 2 ;; esac
 [ "$(uname -s)" = Linux ] || { echo 'Build AppImages on Linux.' >&2; exit 1; }
 case "$(uname -m)" in x86_64) arch=x86_64 ;; aarch64|arm64) arch=aarch64 ;; *) echo 'AppImage builds support x64 and ARM64.' >&2; exit 1 ;; esac
-for tool in python3 patchelf; do command -v "$tool" >/dev/null 2>&1 || { echo "Missing $tool" >&2; exit 1; }; done
+for tool in python3 patchelf curl; do command -v "$tool" >/dev/null 2>&1 || { echo "Missing $tool" >&2; exit 1; }; done
 [ -x "$build_dir/task_master" ] && [ -x "$build_dir/task_master-collector" ] || { echo 'Build the native desktop and collector first.' >&2; exit 1; }
 mkdir -p "$build_dir" "$output_dir"
 work=$(mktemp -d "$build_dir/.appimage-stage-XXXXXX")
@@ -33,6 +33,7 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/libexec/task_master" "$appdir/usr/lib/ta
     "$appdir/usr/share/applications" "$appdir/usr/share/icons/hicolor/scalable/apps" \
     "$appdir/usr/share/doc/task_master" "$appdir/usr/share/task_master"
 python3 scripts/bundle-linux-libraries.py "$build_dir/task_master" "$appdir/usr/bin/task_master" "$appdir/usr/lib/task_master"
+python3 scripts/bundle-linux-libraries.py "$(command -v curl)" "$appdir/usr/bin/curl" "$appdir/usr/lib/task_master" --utility
 python3 scripts/bundle-libdecor.py "$appdir/usr/lib/task_master"
 python3 scripts/bundle-linux-data.py "$appdir"
 python3 scripts/collect-linux-licenses.py "$appdir/usr/lib/task_master" "$appdir/usr/share/doc/task_master/licenses"

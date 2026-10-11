@@ -43,6 +43,8 @@ GPU_Metric :: struct {
     unified_memory: bool, // Graphics allocations share system RAM, rather than dedicated VRAM.
 }
 
+CPU_Package_Power :: struct {package_id:int,watts:f32,available:bool}
+
 CPU_Counters :: struct { total, idle: u64 }
 CPU_Frequency_Source :: enum { None, Measured, Driver, Mixed }
 CPU_Power_Source :: enum { None, Energy, Sensor, Perf }
@@ -94,6 +96,8 @@ Metrics :: struct {
     cpu_topology_generation: u64,
     cpu_busy_lower, cpu_busy_upper, cpu_frequency_mhz, cpu_power_watts: f32,
     cpu_frequency_available, cpu_power_available: bool,
+    cpu_package_power: [16]CPU_Package_Power,
+    cpu_package_power_count: int,
     cpu_frequency_source: CPU_Frequency_Source,
     cpu_power_source: CPU_Power_Source,
     cpu_power_error: [384]u8,
@@ -151,6 +155,7 @@ Metrics_Sampler :: struct {
     _ticks_per_second, _page_size: f64,
     _nvml: NVML_API,
     _nvml_initialized: bool,
+    _nvml_retry_after: time.Tick,
     _gpu_devices: [8]rawptr,
 }
 
@@ -196,6 +201,18 @@ metrics_init_devices :: proc(m: ^Metrics) {
         metrics_sample(m, 0)
         return
     }
+    metrics_init_nvml(m)
+    stage=startup_stage(stage,"NVML initialization")
+    metrics_sample(m, 0)
+    stage=startup_stage(stage,"initial telemetry sample")
+}
+
+// Session services can start before the NVIDIA driver is ready. Retry just
+// device discovery, retaining the CPU/process counter baselines and history.
+metrics_init_nvml :: proc(m: ^Metrics) {
+    metrics_suspend_devices(m)
+    m.nvml_available=false;m.gpu_count=0;m.gpus={};m._gpu_devices={}
+    m._nvml_retry_after=time.tick_add(time.tick_now(),5*time.Second)
     library := "libnvidia-ml.so.1"
     when ODIN_OS == .Windows { library = "nvml.dll" }
     _, loaded := dynlib.initialize_symbols(&m._nvml, library)
@@ -222,9 +239,10 @@ metrics_init_devices :: proc(m: ^Metrics) {
             }
         }
     }
-    stage=startup_stage(stage,"NVML initialization")
-    metrics_sample(m, 0)
-    stage=startup_stage(stage,"initial telemetry sample")
+    if m.gpu_count==0 {
+        metrics_suspend_devices(m)
+        m.nvml_available=false
+    }
 }
 
 // Cached display readings do not need a second live telemetry driver. Keep
@@ -485,6 +503,9 @@ metrics_sample_gpu :: proc(m: ^Metrics) {
     m.gpu_process_count = 0
     m.gpu_total_processes, m.gpu_total_groups = 0, 0
     for &slot in m._gpu_group_table {slot=0}
+    when ODIN_OS != .Darwin {
+        if (!m.nvml_available||m.gpu_count==0)&&time.tick_since(m._nvml_retry_after)>=0 {metrics_init_nvml(m)}
+    }
     when ODIN_OS != .Windows { if !m.nvml_available { return } }
     // Enough for both 128-entry NVML lists on each of the eight supported GPUs.
     all_processes: [2048]GPU_Process_Memory

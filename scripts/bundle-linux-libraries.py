@@ -52,20 +52,24 @@ parser.add_argument("binary", type=pathlib.Path)
 parser.add_argument("destination", type=pathlib.Path)
 parser.add_argument("library_directory", type=pathlib.Path)
 parser.add_argument("--only", help="Copy only this direct dependency (Debian's private GLFW)")
+parser.add_argument("--utility", action="store_true", help="Bundle a utility and its dependencies without desktop backends")
 args = parser.parse_args()
+if args.only and args.utility:
+    parser.error("--only and --utility cannot be combined")
 if os.uname().sysname != "Linux":
     raise SystemExit("Build Linux packages on Linux.")
 for tool in ("ldd", "patchelf"):
     if not shutil.which(tool):
         raise SystemExit(f"Required tool not found: {tool}")
 direct = dependencies(args.binary)
-if "libglfw.so.3" not in direct:
-    raise SystemExit("Desktop does not link the expected GLFW shared library.")
-glfw = ctypes.CDLL(str(direct["libglfw.so.3"]))
-major, minor, patch = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
-glfw.glfwGetVersion(ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch))
-if (major.value, minor.value) < (3, 4):
-    raise SystemExit("task_master requires GLFW 3.4 or newer; build that library before packaging.")
+if not args.utility:
+    if "libglfw.so.3" not in direct:
+        raise SystemExit("Desktop does not link the expected GLFW shared library.")
+    glfw = ctypes.CDLL(str(direct["libglfw.so.3"]))
+    major, minor, patch = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
+    glfw.glfwGetVersion(ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch))
+    if (major.value, minor.value) < (3, 4):
+        raise SystemExit("task_master requires GLFW 3.4 or newer; build that library before packaging.")
 args.destination.parent.mkdir(parents=True, exist_ok=True)
 args.library_directory.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(args.binary, args.destination)
@@ -73,7 +77,7 @@ args.destination.chmod(0o755)
 relative = os.path.relpath(args.library_directory, args.destination.parent)
 run("patchelf", "--set-rpath", f"$ORIGIN/{relative}", str(args.destination))
 pending = {args.only: direct[args.only]} if args.only else dict(direct)
-if not args.only:
+if not args.only and not args.utility:
     # GLFW loads these at runtime, so they are absent from DT_NEEDED/ldd. Both
     # desktop backends and the Vulkan loader remain available in the AppImage.
     cache = {}
@@ -85,10 +89,21 @@ if not args.only:
     for name in ("libvulkan.so.1", "libwayland-client.so.0", "libwayland-cursor.so.0", "libwayland-egl.so.1", "libxkbcommon.so.0", "libdecor-0.so.0",
                  "libX11.so.6", "libX11-xcb.so.1", "libXrandr.so.2", "libXinerama.so.1", "libXcursor.so.1", "libXi.so.6", "libXxf86vm.so.1"):
         pending[name] = locate(name, cache)
+manifest = args.library_directory / "libraries.txt"
 copied = {}
+if manifest.is_file():
+    for line in manifest.read_text().splitlines():
+        if line.strip():
+            name, source = line.split(": ", 1)
+            copied[name] = pathlib.Path(source).resolve()
+before = len(copied)
 while pending:
     name, source = pending.popitem()
-    if excluded(name) or name in copied:
+    if excluded(name):
+        continue
+    if name in copied:
+        if copied[name] != source.resolve():
+            raise SystemExit(f"Conflicting bundled dependency {name}: {copied[name]} and {source}")
         continue
     target = args.library_directory / name
     shutil.copyfile(source, target)
@@ -97,8 +112,10 @@ while pending:
     run("patchelf", "--set-rpath", "$ORIGIN", str(target))
     if not args.only:
         for child, path in dependencies(source).items():
-            if child not in copied:
-                pending[child] = path
-manifest = args.library_directory / "libraries.txt"
+            pending[child] = path
+if args.utility:
+    # Include the executable's package notice as well as its shared libraries.
+    copied[args.destination.name] = args.binary.resolve()
 manifest.write_text("\n".join(f"{name}: {source}" for name, source in sorted(copied.items())) + "\n")
-print(f"Bundled {len(copied)} libraries; GLFW {major.value}.{minor.value}.{patch.value}; RUNPATH $ORIGIN/{relative}")
+description = "utility" if args.utility else f"GLFW {major.value}.{minor.value}.{patch.value}"
+print(f"Bundled {len(copied) - before} entries; {description}; RUNPATH $ORIGIN/{relative}")

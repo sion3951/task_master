@@ -35,7 +35,9 @@ SetupLogging=yes
 ; payloads temporary so upgrades do not overwrite a running sensor service.
 Source: "{#PayloadDirectory}\install-sensors.ps1"; DestDir: "{tmp}\task_master"; Flags: dontcopy
 Source: "{#PayloadDirectory}\sensors\*"; DestDir: "{tmp}\task_master\sensors"; Flags: dontcopy recursesubdirs createallsubdirs
-Source: "{#PayloadDirectory}\task_master.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Start a new stream so desktop extraction does not decompress the temporary
+; sensor payload a second time after PrepareToInstall has already extracted it.
+Source: "{#PayloadDirectory}\task_master.exe"; DestDir: "{app}"; Flags: ignoreversion solidbreak
 Source: "{#PayloadDirectory}\task_master-collector.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDirectory}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDirectory}\install-windows.ps1"; DestDir: "{app}"; Flags: ignoreversion
@@ -49,6 +51,19 @@ Name: "{commonprograms}\task_master"; Filename: "{app}\task_master.exe"; Working
 Filename: "{app}\task_master.exe"; Description: "Launch task_master"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Code]
+var
+  SensorProgressPage: TOutputProgressWizardPage;
+  SensorsPrepared: Boolean;
+
+function SensorSetupTickCount: Int64;
+  external 'GetTickCount64@kernel32.dll stdcall';
+
+procedure InitializeWizard;
+begin
+  SensorProgressPage := CreateOutputProgressPage('Preparing hardware sensors',
+    'Setup is preparing the required sensor service.');
+end;
+
 function PowerShellQuote(Value: String): String;
 begin
   StringChangeEx(Value, '''', '''''', True);
@@ -82,13 +97,40 @@ begin
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  StartedAt: Int64;
 begin
   Result := '';
-  ExtractTemporaryFiles('{tmp}\task_master\*');
-  if not RunSensors(ExpandConstant('{tmp}\task_master\install-sensors.ps1'),
-      '-SourceDirectory ' + PowerShellQuote(ExpandConstant('{tmp}\task_master\sensors')),
-      'task_master-sensors-install.log') then
-    Result := 'task_master requires its sensor service. Resolve the reported error and retry setup.';
+  if SensorsPrepared then
+    Exit;
+  SensorProgressPage.SetText('Extracting hardware sensor files...', '');
+  SensorProgressPage.SetProgress(0, 2);
+  SensorProgressPage.Show;
+  try
+    StartedAt := SensorSetupTickCount;
+    try
+      ExtractTemporaryFiles('{tmp}\task_master\*');
+    finally
+      Log(Format('Sensor payload extraction took %d ms.', [SensorSetupTickCount - StartedAt]));
+    end;
+    SensorProgressPage.SetText('Installing the hardware sensor driver and service...',
+      'Setup will continue when the sensor service is ready.');
+    SensorProgressPage.SetProgress(1, 2);
+    StartedAt := SensorSetupTickCount;
+    try
+      if RunSensors(ExpandConstant('{tmp}\task_master\install-sensors.ps1'),
+          '-SourceDirectory ' + PowerShellQuote(ExpandConstant('{tmp}\task_master\sensors')),
+          'task_master-sensors-install.log') then begin
+        SensorsPrepared := True;
+        SensorProgressPage.SetProgress(2, 2);
+      end else
+        Result := 'task_master requires its sensor service. Resolve the reported error and retry setup.';
+    finally
+      Log(Format('Sensor driver and service setup took %d ms.', [SensorSetupTickCount - StartedAt]));
+    end;
+  finally
+    SensorProgressPage.Hide;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

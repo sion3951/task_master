@@ -23,6 +23,12 @@ Then, from an administrator PowerShell:
 ./scripts/install-sensors.ps1
 ```
 
+Complete Windows builds bundle the unchanged official PawnIO installer for
+offline setup, including remote Install / fix. A standalone helper without the
+bundled installer downloads it when needed. Driver upgrades reuse one verified
+download. Sensor runtime staging uses parallel copies and retains private ACLs,
+service rollback and bounded start/stop waits. Setup logs record stage timings.
+
 The installer verifies SHA-256 and Authenticode for the pinned official signed
 PawnIO 2.2.0 installer, and installs `task_master_sensors` in a directory writable
 only by SYSTEM and Administrators. The desktop and persistence collector do not

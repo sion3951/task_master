@@ -4,6 +4,8 @@ GLSLC_FLAGS ?= $(if $(filter %glslangValidator,$(GLSLC)),-V)
 # Keep idle per-thread scratch small; Odin grows it for larger JSON frames and
 # releases the additional blocks after each sample/frame.
 ODIN_MEMORY_FLAGS := -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536
+PACKAGE_VERSION ?= $(shell cat VERSION)
+ODIN_VERSION_FLAGS := -define:TASK_MASTER_VERSION=$(PACKAGE_VERSION)
 TELEMETRY_SOURCES := $(wildcard telemetry*.odin)
 COLLECTOR_SOURCES := $(wildcard collector/*.odin)
 # Embed available extra payloads in development builds. The release target
@@ -28,9 +30,9 @@ shaders/ui.vert.spv: shaders/ui.vert
 shaders/ui.frag.spv: shaders/ui.frag
 	$(GLSLC) $(GLSLC_FLAGS) $< -o $@
 
-build/task_master: $(wildcard *.odin) scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist shaders/ui.vert.spv shaders/ui.frag.spv assets/DejaVuSans.ttf build/task_master-collector $(EXTRA_PAYLOADS)
+build/task_master: $(wildcard *.odin) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist shaders/ui.vert.spv shaders/ui.frag.spv assets/DejaVuSans.ttf build/task_master-collector $(EXTRA_PAYLOADS)
 	mkdir -p build
-	$(ODIN) build . -out:$@ -o:speed -no-bounds-check -vet $(ODIN_MEMORY_FLAGS) $(REMOTE_PAYLOAD_FLAGS)
+	$(ODIN) build . -out:$@ -o:speed -no-bounds-check -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(REMOTE_PAYLOAD_FLAGS)
 
 # Stage just the shared sampler and protocol; the remote agent has no GLFW or
 # Vulkan dependency and does not require a display server.

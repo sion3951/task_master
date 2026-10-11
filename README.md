@@ -32,6 +32,11 @@ lines, busy-time bands, percentages and sibling-thread bars. Physical-core
 ranges use their measured lower bound for colour; each history sample retains
 its own utilisation colour. RAM and swap details and process CPU/RAM/VRAM values
 use the same scale; memory colours show the fraction of capacity used.
+When a machine has multiple GPUs or CPU sockets, the GPU and CPU dashboard
+headers show left/right arrows around the device name. The arrows wrap through
+the devices; the selected device has its own metrics and history. CPU core rows
+show only the selected socket. Selections are remembered per machine for the
+current session. The GPU process table covers processes across all GPUs.
 The window follows the compositor's assigned size, including Hyprland tiling
 and fractional display scaling.
 Every history graph has one gentle gradient anchored to its full height and
@@ -305,6 +310,9 @@ Installation adds a Start menu shortcut, installs the collector for Windows
 SSH sessions and configures **task_master_sensors**, a read-only CPU sensor
 service. It samples on demand and closes hardware handles after clients stop
 requesting data; it does not keep sampling when the UI and persistence are off.
+Complete builds bundle the unchanged official **PawnIO** installer so setup and
+remote Install / fix do not need to download it. Sensor runtime staging uses
+parallel copies, and setup shows preparation progress and logs stage durations.
 The pinned official **PawnIO** installer is hash-checked and its
 signature verified; its supported signed driver provides CPU sensor access.
 Administrative authorization is confined to installation. The desktop and
@@ -653,6 +661,9 @@ The window shows its fresh local hardware reading immediately; cached history
 loads on the background reader. Local sampling continues during service startup
 until a current snapshot includes the GPUs detected by the desktop, preventing
 an older cache from replacing live GPU readings with an unavailable state.
+If the NVIDIA driver is unavailable at service startup, device discovery retries
+every five seconds. Service history resumes at handoff without inserting its
+unavailable GPU samples between the desktop's live readings.
 Fresh history stays connected across the desktop/service handoff and a short
 service refresh at launch, including remote SSH sampler handoffs; longer outages,
 explicit pauses and dropped samples retain their gaps. Remote graphs start with
@@ -768,6 +779,19 @@ run exercised both full PID limits, CPU-counter growth, snapshot roundtripping,
 display copies and rejection of invalid frames. NVML unloading/reloading was
 also checked on the real GPU. PNG capture is more expensive than normal
 monitoring and is excluded from the CPU figure.
+
+## Automatic updates
+
+Release installations check the latest stable GitHub release in the background
+and download a verified update. Open **Updates** in the header to use **Check
+now**, turn **Automatic downloads** on or off, or select **Update and restart**
+when a package is ready. Installation requests administrator authorization
+when needed and relaunches the app as your ordinary user. Source builds keep
+their checkout intact and require installing a release package first.
+
+`task_master --version` prints the installed version;
+`task_master --check-updates` checks and verifies the latest signed update without opening
+a window or installing it. See [updater setup and release signing](docs/updater.md).
 
 ## Diagnostics
 

@@ -507,6 +507,7 @@ metrics_init_cpu_power :: proc(m: ^Metrics) {
 }
 
 metrics_sample_cpu_power :: proc(m: ^Metrics, elapsed: f64) {
+    m.cpu_package_power={};m.cpu_package_power_count=0
     m.cpu_power_available = false
     m.cpu_power_watts = 0
     if m._cpu_power_domain_count == 0 { return }
@@ -531,7 +532,12 @@ metrics_sample_cpu_power :: proc(m: ^Metrics, elapsed: f64) {
     }
     if !all_available { metrics_cpu_power_error(m, "Incomplete package counters") }
     watts: f64
-    for &domain in m._cpu_power_domains[:m._cpu_power_domain_count] {
+    m.cpu_package_power_count=m._cpu_power_domain_count
+    for &domain,index in m._cpu_power_domains[:m._cpu_power_domain_count] {
+        package_power:=&m.cpu_package_power[index]
+        package_power.package_id=domain.package_id
+        // An unlabeled hwmon source can only identify a single socket.
+        if package_power.package_id<0&&package_count==1&&m.physical_core_count>0 {package_power.package_id=m.physical_cores[0].package_id}
         if m.cpu_power_source == .Perf {
             // One binary counter read per package. Kernel energy counts already
             // handle hardware counter wraps; never sum overlapping child events.
@@ -548,7 +554,9 @@ metrics_sample_cpu_power :: proc(m: ^Metrics, elapsed: f64) {
             } else {
                 enabled_delta := enabled-domain.previous_enabled
                 running_delta := running-domain.previous_running
-                watts += f64(value-domain.previous_energy)*domain.joules_per_count*f64(enabled_delta)/f64(running_delta)/elapsed
+                package_power.watts=f32(f64(value-domain.previous_energy)*domain.joules_per_count*f64(enabled_delta)/f64(running_delta)/elapsed)
+                package_power.available=package_power.package_id>=0
+                watts+=f64(package_power.watts)
             }
             domain.previous_energy, domain.previous_enabled, domain.previous_running = value, enabled, running
             domain.ready = true
@@ -563,21 +571,32 @@ metrics_sample_cpu_power :: proc(m: ^Metrics, elapsed: f64) {
             domain.ready = false; all_available = false; continue
         }
         if m.cpu_power_source == .Sensor {
-            watts += f64(value)/1e6 // Linux hwmon power is microwatts.
+            package_power.watts=f32(f64(value)/1e6) // Linux hwmon power is microwatts.
+            package_power.available=package_power.package_id>=0
+            watts+=f64(package_power.watts)
             continue
         }
         if !domain.ready || elapsed <= 0 {
             all_available = false
         } else if value >= domain.previous_energy {
-            watts += f64(value-domain.previous_energy)/1e6/elapsed
+            package_power.watts=f32(f64(value-domain.previous_energy)/1e6/elapsed)
+            package_power.available=package_power.package_id>=0
+            watts+=f64(package_power.watts)
         } else if domain.energy_range > 0 && domain.previous_energy < domain.energy_range && value < domain.energy_range {
-            watts += f64(domain.energy_range-domain.previous_energy+value)/1e6/elapsed
+            package_power.watts=f32(f64(domain.energy_range-domain.previous_energy+value)/1e6/elapsed)
+            package_power.available=package_power.package_id>=0
+            watts+=f64(package_power.watts)
         } else {
             all_available = false
         }
         domain.previous_energy = value
         domain.ready = true
     }
+    identified:=0
+    for package_power in m.cpu_package_power[:m.cpu_package_power_count] {
+        if package_power.package_id>=0 {m.cpu_package_power[identified]=package_power;identified+=1}
+    }
+    m.cpu_package_power_count=identified
     if all_available {
         m.cpu_power_available = true
         m.cpu_power_watts = f32(watts)

@@ -84,16 +84,15 @@ graph_readout_advance :: proc(r:^Graph_Readout) {
         s.network_rx=from.network_rx+(to.network_rx-from.network_rx)*f64(t)
         s.network_tx=from.network_tx+(to.network_tx-from.network_tx)*f64(t)
     }
-    g0,g1,g:=&from.gpu,&to.gpu,&s.gpu
-    if g0.utilization_available&&g1.utilization_available {g.utilization=g0.utilization+(g1.utilization-g0.utilization)*t}
-    if g0.memory_available&&g1.memory_available {
-        g.memory_used=graph_readout_bytes(g0.memory_used,g1.memory_used,t)
-        g.memory_percent=g0.memory_percent+(g1.memory_percent-g0.memory_percent)*t
+    graph_readout_gpu(&s.gpu,&from.gpu,&to.gpu,t)
+    for index in 0..<s.gpu_count {
+        if index<from.gpu_count {graph_readout_gpu(&s.gpus[index],&from.gpus[index],&to.gpus[index],t)}
     }
-    if g0.power_available&&g1.power_available {g.power_watts=g0.power_watts+(g1.power_watts-g0.power_watts)*t}
-    if g0.frequency_available&&g1.frequency_available {g.frequency_mhz=g0.frequency_mhz+(g1.frequency_mhz-g0.frequency_mhz)*t}
-    if g0.temperature_available&&g1.temperature_available {g.temperature=g0.temperature+(g1.temperature-g0.temperature)*t}
-    if g0.fan_available&&g1.fan_available {g.fan_percent=g0.fan_percent+(g1.fan_percent-g0.fan_percent)*t}
+    for &power in s.cpu_package_power[:s.cpu_package_power_count] {
+        for old in from.cpu_package_power[:from.cpu_package_power_count] {
+            if old.package_id==power.package_id&&old.available&&power.available {power.watts=old.watts+(power.watts-old.watts)*t;break}
+        }
+    }
 }
 
 graph_readout_sample :: proc(a:^App,target:^CPU_Sample,inspecting,scrubbing:bool,plot_width:f32)->^CPU_Sample {
@@ -122,4 +121,16 @@ graph_readout_sample :: proc(a:^App,target:^CPU_Sample,inspecting,scrubbing:bool
     }
     r.inspecting=inspecting
     return &r.current
+}
+
+graph_readout_gpu :: proc(g,g0,g1:^GPU_Sample,t:f32) {
+    if g0.utilization_available&&g1.utilization_available {g.utilization=g0.utilization+(g1.utilization-g0.utilization)*t}
+    if g0.memory_available&&g1.memory_available {
+        g.memory_used=graph_readout_bytes(g0.memory_used,g1.memory_used,t)
+        g.memory_percent=g0.memory_percent+(g1.memory_percent-g0.memory_percent)*t
+    }
+    if g0.power_available&&g1.power_available {g.power_watts=g0.power_watts+(g1.power_watts-g0.power_watts)*t}
+    if g0.frequency_available&&g1.frequency_available {g.frequency_mhz=g0.frequency_mhz+(g1.frequency_mhz-g0.frequency_mhz)*t}
+    if g0.temperature_available&&g1.temperature_available {g.temperature=g0.temperature+(g1.temperature-g0.temperature)*t}
+    if g0.fan_available&&g1.fan_available {g.fan_percent=g0.fan_percent+(g1.fan_percent-g0.fan_percent)*t}
 }

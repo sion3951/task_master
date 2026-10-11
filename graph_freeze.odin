@@ -13,6 +13,7 @@ graph_freeze_capture :: proc(m:^Machine) {
     if m.state!=nil {
         live:=m.state
         metrics_display_copy(&frozen.metrics,&live.metrics)
+        frozen.selected_cpu,frozen.selected_gpu=live.selected_cpu,live.selected_gpu
         frozen.io_summary=live.io_summary
         frozen.history=live.history;frozen.cpu_history=live.cpu_history
         frozen.history_count,frozen.history_next=live.history_count,live.history_next
@@ -114,6 +115,7 @@ graph_animation_begin :: proc(a:^App,incoming:bool,x,w:f32)->(plot:Graph_Animati
     } else {
         plot.shift=-w*distance*a.graph_catchup_progress
         plot.left,plot.right=x,seam
+        frozen.selected_cpu,frozen.selected_gpu=plot.live.selected_cpu,plot.live.selected_gpu
         a.machine=frozen
     }
     return plot,plot.right>plot.left
@@ -136,16 +138,19 @@ graph_animation_ceiling :: proc(a:^App,current:f32,axis:Graph_Animation_Axis)->f
     frozen:=a.machines[a.active_machine].frozen_graphs
     if !a.graphs_catching_up||frozen==nil {return current}
     m:=&frozen.metrics
+    gpu_index:=clamp(a.selected_gpu,0,max(0,m.gpu_count-1))
+    frozen.selected_cpu,frozen.selected_gpu=a.selected_cpu,a.selected_gpu
+    frozen_app:=a^;frozen_app.machine=frozen
     previous,step:=f32(50),f32(50)
     gpu_power_known:=false
     switch axis {
     case .CPU_Power:
     case .CPU_Frequency:previous,step=6000,1000
     case .GPU_Power:
-        gpu_power_known=m.gpus[0].power_max_available
-        if gpu_power_known {previous=m.gpus[0].power_max_watts}
+        gpu_power_known=m.gpus[gpu_index].power_max_available
+        if gpu_power_known {previous=m.gpus[gpu_index].power_max_watts}
     case .GPU_Frequency:previous,step=500,500
-    case .GPU_Memory:previous=max(f32(1),f32(math.ceil(f64(m.gpus[0].memory_total)/GPU_MEMORY_GB)))
+    case .GPU_Memory:previous=max(f32(1),f32(math.ceil(f64(m.gpus[gpu_index].memory_total)/GPU_MEMORY_GB)))
     case .RAM:previous=memory_capacity_ceiling(m.memory_total)
     case .Disk,.Network:previous=1024
     }
@@ -154,13 +159,15 @@ graph_animation_ceiling :: proc(a:^App,current:f32,axis:Graph_Animation_Axis)->f
     for i in 0..<frozen.history_count {
         sample:=&frozen.cpu_history[(first+i)%HISTORY_CAPACITY]
         if frozen.cpu_history[latest].timestamp-sample.timestamp>a.history_seconds {continue}
+        cpu:=cpu_device_sample(&frozen_app,sample)
+        gpu:=gpu_device_sample(&frozen_app,sample)
         value:f32
         available:=false
         switch axis {
-        case .CPU_Power:value,available=sample.power_watts,sample.power_available&&sample.generation==m.cpu_topology_generation
-        case .CPU_Frequency:value,available=sample.frequency_mhz,sample.frequency_available&&sample.generation==m.cpu_topology_generation
-        case .GPU_Power:value,available=sample.gpu.power_watts,sample.gpu.power_available&&!gpu_power_known
-        case .GPU_Frequency:value,available=sample.gpu.frequency_mhz,sample.gpu.frequency_available
+        case .CPU_Power:value,available=cpu.power_watts,cpu.power_available&&sample.generation==m.cpu_topology_generation
+        case .CPU_Frequency:value,available=cpu.frequency_mhz,cpu.frequency_available&&sample.generation==m.cpu_topology_generation
+        case .GPU_Power:value,available=gpu.power_watts,gpu.power_available&&!gpu_power_known
+        case .GPU_Frequency:value,available=gpu.frequency_mhz,gpu.frequency_available
         case .GPU_Memory,.RAM:
         case .Disk:value,available=f32(max(sample.disk_read,sample.disk_write)),sample.rates_ready
         case .Network:value,available=f32(max(sample.network_rx,sample.network_tx)),sample.network_rates_ready
@@ -182,11 +189,13 @@ graph_page_draw :: proc(a:^App) {
     live:=a.machine
     displayed:=graph_display_state(a)
     if displayed!=live {
+        displayed.selected_cpu,displayed.selected_gpu=live.selected_cpu,live.selected_gpu
         displayed.cpu_scroll,displayed.gpu_scroll=live.cpu_scroll,live.gpu_scroll
         displayed.memory_scroll,displayed.overview_scroll=live.memory_scroll,live.overview_scroll
     }
     a.machine=displayed
     defer {
+        live.selected_cpu,live.selected_gpu=displayed.selected_cpu,displayed.selected_gpu
         live.cpu_scroll,live.gpu_scroll=displayed.cpu_scroll,displayed.gpu_scroll
         live.memory_scroll,live.overview_scroll=displayed.memory_scroll,displayed.overview_scroll
         a.machine=live

@@ -19,7 +19,16 @@ cpu_range_label :: proc(lower,upper:f32)->string {
     return fmt.tprintf("%.0f-%.0f%%",lower,upper)
 }
 
-cpu_plot_value :: proc(s:^CPU_Sample,kind:CPU_Plot,core:int=-1)->(f32,bool) {
+cpu_plot_value :: proc(s:^CPU_Sample,kind:CPU_Plot,core:int=-1,a:^App=nil)->(f32,bool) {
+    if a!=nil&&a.view==.CPU&&core<0&&cpu_plot_topology(kind) {
+        device:=cpu_device_sample(a,s)
+        #partial switch kind {
+        case .Busy:return device.lower,true
+        case .Threads:return device.threads,true
+        case .Power:return device.power_watts,device.power_available
+        case .Frequency:return device.frequency_mhz,device.frequency_available
+        }
+    }
     switch kind {
     case .Busy:
         if core>=0 {return s.cores[core].lower,true}
@@ -43,12 +52,13 @@ cpu_plot_value :: proc(s:^CPU_Sample,kind:CPU_Plot,core:int=-1)->(f32,bool) {
     return 0,false
 }
 
-cpu_curve_sample :: proc(s:^CPU_Sample,kind:CPU_Plot,core:int,upper:bool)->(f32,bool) {
+cpu_curve_sample :: proc(a:^App,s:^CPU_Sample,kind:CPU_Plot,core:int,upper:bool)->(f32,bool) {
     if kind==.Busy&&upper {
         if core>=0 {return s.cores[core].upper,true}
+        if a.view==.CPU {return cpu_device_sample(a,s).upper,true}
         return s.upper,true
     }
-    return cpu_plot_value(s,kind,core)
+    return cpu_plot_value(s,kind,core,a)
 }
 
 cpu_curve_slope :: proc(left,right,left_dt,right_dt:f32)->f32 {
@@ -61,8 +71,8 @@ cpu_curve_slope :: proc(left,right,left_dt,right_dt:f32)->f32 {
 cpu_plot_curve :: proc(a:^App,kind:CPU_Plot,first,index,core:int,upper:bool=false)->[4]f32 {
     prev:=graph_plot_sample(a,(first+index)%HISTORY_CAPACITY)
     next:=graph_plot_sample(a,(first+index+1)%HISTORY_CAPACITY)
-    v0,_:=cpu_curve_sample(prev,kind,core,upper)
-    v1,_:=cpu_curve_sample(next,kind,core,upper)
+    v0,_:=cpu_curve_sample(a,prev,kind,core,upper)
+    v1,_:=cpu_curve_sample(a,next,kind,core,upper)
     dt:=f32(next.timestamp-prev.timestamp)
     if dt<=0 {return {v0,v1,0,0}}
     slope:=(v1-v0)/dt
@@ -70,7 +80,7 @@ cpu_plot_curve :: proc(a:^App,kind:CPU_Plot,first,index,core:int,upper:bool=fals
     if index>0 {
         before:=graph_plot_sample(a,(first+index-1)%HISTORY_CAPACITY)
         before_dt:=f32(prev.timestamp-before.timestamp)
-        value,available:=cpu_curve_sample(before,kind,core,upper)
+        value,available:=cpu_curve_sample(a,before,kind,core,upper)
         if available&&(!cpu_plot_topology(kind)||before.generation==prev.generation)&&history_segment_contiguous(before,prev) {
             m0=cpu_curve_slope((v0-value)/before_dt,slope,before_dt,dt)
         }
@@ -78,7 +88,7 @@ cpu_plot_curve :: proc(a:^App,kind:CPU_Plot,first,index,core:int,upper:bool=fals
     if index+2<a.history_count {
         after:=graph_plot_sample(a,(first+index+2)%HISTORY_CAPACITY)
         after_dt:=f32(after.timestamp-next.timestamp)
-        value,available:=cpu_curve_sample(after,kind,core,upper)
+        value,available:=cpu_curve_sample(a,after,kind,core,upper)
         if available&&(!cpu_plot_topology(kind)||after.generation==next.generation)&&history_segment_contiguous(next,after) {
             m1=cpu_curve_slope(slope,(value-v1)/after_dt,dt,after_dt)
         }
@@ -157,8 +167,8 @@ cpu_plot :: proc(a:^App,kind:CPU_Plot,core:int,x,y,w,h,ceiling:f32,color:Color,b
         prev:=graph_plot_sample(a,(first+i-1)%HISTORY_CAPACITY)
         next:=graph_plot_sample(a,(first+i)%HISTORY_CAPACITY)
         if cpu_plot_topology(kind)&&(prev.generation!=a.metrics.cpu_topology_generation||next.generation!=a.metrics.cpu_topology_generation) {continue}
-        pv,pok:=cpu_plot_value(prev,kind,core)
-        nv,nok:=cpu_plot_value(next,kind,core)
+        pv,pok:=cpu_plot_value(prev,kind,core,a)
+        nv,nok:=cpu_plot_value(next,kind,core,a)
         if !pok||!nok {continue}
         if !history_segment_contiguous(prev,next) {continue}
         if kind!=.Threads {
@@ -185,6 +195,7 @@ cpu_plot :: proc(a:^App,kind:CPU_Plot,core:int,x,y,w,h,ceiling:f32,color:Color,b
         if band&&render_pass==.Fill {
             pu,nu:=prev.upper,next.upper
             if core>=0 {pu,nu=prev.cores[core].upper,next.cores[core].upper}
+            else if a.view==.CPU {pu,nu=cpu_device_sample(a,prev).upper,cpu_device_sample(a,next).upper}
             pu+=(nu-pu)*clipped
             lower0:=raw_prev+(raw_next-raw_prev)*clipped
             top0,top1:=y+h*(1-clamp(pu/ceiling,0,1)),y+h*(1-clamp(nu/ceiling,0,1))
@@ -225,15 +236,28 @@ cpu_dashboard :: proc(a:^App) {
     m:=&a.metrics
     x,w:=a.content_x,a.width-2*a.content_x
     if w<160 {return}
+    a.clip_active=true;a.clip_top,a.clip_bottom=72,a.height-a.content_x
+    package_ids,package_count:=cpu_packages(m)
+    titles:[256]string
+    for id,i in package_ids[:package_count] {titles[i]=fmt.tprintf("CPU %d / %s",id,m.cpu_model) if package_count>1 else m.cpu_model}
+    device_selector(a,&a.selected_cpu,titles[:package_count],x,79-a.cpu_scroll,w,m.cpu_model)
+    package_id:=-1
+    if package_count>0 {package_id=package_ids[a.selected_cpu]}
+    core_indices:[256]int
+    core_count,online_count:int
+    for core,i in m.physical_cores[:m.physical_core_count] {
+        if package_count>1&&core.package_id!=package_id {continue}
+        core_indices[core_count]=i;core_count+=1;online_count+=core.logical_count
+    }
     compact:=w<700
     stats_rows:=2 if compact else 1
     stats_cols:=2 if compact else 4
     stats_h:=f32(stats_rows)*66
     graph_y:=f32(72)+65+stats_h
     cols:=1 if w<460 else (2 if compact else 4)
-    rows:=(m.physical_core_count+cols-1)/cols
+    rows:=(core_count+cols-1)/cols
     siblings:=2
-    for core in m.physical_cores[:m.physical_core_count] {siblings=max(siblings,core.logical_count)}
+    for index in core_indices[:core_count] {siblings=max(siblings,m.physical_cores[index].logical_count)}
     viewport_top,viewport_bottom:=f32(72),a.height-a.content_x
     plot_gap:=f32(50)
     plot_header_h,time_axis_h,core_gap:=f32(36),f32(22),f32(34)
@@ -257,8 +281,7 @@ cpu_dashboard :: proc(a:^App) {
     a.table_x,a.table_y,a.table_w,a.table_h=x,viewport_top,w,max(0,viewport_bottom-viewport_top)
     a.clip_active=true;a.clip_top,a.clip_bottom=viewport_top,viewport_bottom
     defer a.clip_active=false
-    fit_text(a,m.cpu_model,x,99-offset,w,17)
-    fit_text(a,fmt.tprintf("%d physical cores / %d online threads",m.physical_core_count,m.cpu_online_count) if m.cpu_topology_available else "Topology unavailable - logical CPU fallback",x,121-offset,w,12,MUTED)
+    fit_text(a,fmt.tprintf("%d physical cores / %d online threads",core_count,online_count) if m.cpu_topology_available else "Topology unavailable - logical CPU fallback",x,121-offset,w,12,MUTED)
 
     first:=(a.history_next-a.history_count+HISTORY_CAPACITY)%HISTORY_CAPACITY
     hover_slot:=-1
@@ -292,11 +315,13 @@ cpu_dashboard :: proc(a:^App) {
     s:^CPU_Sample
     if slot>=0&&a.cpu_history[slot].generation==m.cpu_topology_generation {s=&a.cpu_history[slot]}
     if s!=nil {s=graph_readout_sample(a,s,hover_slot>=0||a.cpu_pinned_slot>=0,hover_slot>=0&&a.cpu_pinned_slot<0,gw)}
+    device:CPU_Device_Sample
+    if s!=nil {device=cpu_device_sample(a,s)}
     ready:=s!=nil&&m.cpu_available
     labels:=[4]string{"Physical cores busy","Logical threads busy","CPU package power","Active mean frequency"}
     if !m.cpu_topology_available {labels[0]="CPU busy"}
     if m.cpu_frequency_source==.Driver||m.cpu_frequency_source==.Mixed {labels[3]="Active frequency (reported)"}
-    if ready&&s.lower==0 {labels[3]="Core mean frequency (idle)"}
+    if ready&&device.lower==0 {labels[3]="Core mean frequency (idle)"}
     gap:=f32(20)
     cell_w:=(w-gap*f32(cols-1))/f32(cols)
     stats_w:=(w-gap*f32(stats_cols-1))/f32(stats_cols)
@@ -307,14 +332,14 @@ cpu_dashboard :: proc(a:^App) {
         value:="--"
         if ready {
             switch i {
-            case 0:value=cpu_range_label(s.lower,s.upper)
-            case 1:value=fmt.tprintf("%.0f%%",s.threads)
-            case 2:if s.power_available {value=fmt.tprintf("%.0f W",s.power_watts)}
-            case 3:if s.frequency_available {value=fmt.tprintf("%.2f GHz",s.frequency_mhz/1000)}
+            case 0:value=cpu_range_label(device.lower,device.upper)
+            case 1:value=fmt.tprintf("%.0f%%",device.threads)
+            case 2:if device.power_available {value=fmt.tprintf("%.0f W",device.power_watts)}
+            case 3:if device.frequency_available {value=fmt.tprintf("%.2f GHz",device.frequency_mhz/1000)}
             }
         }
         value_color:=TEXT
-        if ready&&i<2 {value_color=utilization_color(s.lower if i==0 else s.threads)}
+        if ready&&i<2 {value_color=utilization_color(device.lower if i==0 else device.threads)}
         fit_text(a,value,sx,sy+34,stats_w,27 if w>850||compact else 22,value_color)
     }
     // Aligned histories sit directly on the background, each with its own scale.
@@ -325,15 +350,16 @@ cpu_dashboard :: proc(a:^App) {
     for _,i in 0..<a.history_count {
         hist:=&a.cpu_history[(first+i)%HISTORY_CAPACITY]
         if hist.generation!=m.cpu_topology_generation||history_position(a,(first+i)%HISTORY_CAPACITY)<0 {continue}
-        if hist.power_available {power_max=max(power_max,f32(math.ceil(hist.power_watts/50))*50)}
-        if hist.frequency_available {freq_max=max(freq_max,f32(math.ceil(hist.frequency_mhz/1000))*1000)}
+        selected:=cpu_device_sample(a,hist)
+        if selected.power_available {power_max=max(power_max,f32(math.ceil(selected.power_watts/50))*50)}
+        if selected.frequency_available {freq_max=max(freq_max,f32(math.ceil(selected.frequency_mhz/1000))*1000)}
     }
     power_y:=gy+busy_h+plot_gap
     power_max=graph_animation_ceiling(a,power_max,.CPU_Power)
     freq_max=graph_animation_ceiling(a,freq_max,.CPU_Frequency)
     text(a,"PACKAGE POWER W",x,power_y-18,12,MUTED)
-    if !m.cpu_power_available {
-        status := metrics_cpu_power_status(m)
+    if !device.power_available {
+        status := "Per-package power unavailable" if package_count>1 else metrics_cpu_power_status(m)
         if m.cpu_power_permission_denied {
             status = "Permission denied - install task_master on this host"
         }
@@ -348,7 +374,7 @@ cpu_dashboard :: proc(a:^App) {
     cpu_plot(a,.Power,-1,gx,power_y,gw,small_h,power_max,AMBER)
     freq_y:=power_y+small_h+plot_gap
     text(a,"ACTIVE FREQUENCY GHz",x,freq_y-18,12,MUTED)
-    if !m.cpu_frequency_available {right_text(a,"Unavailable",x+w,freq_y-18,12,MUTED)}
+    if !device.frequency_available {right_text(a,"Unavailable",x+w,freq_y-18,12,MUTED)}
     cpu_grid(a,gx,freq_y,gw,small_h,freq_max,.Frequency,label_x=x)
     cpu_plot(a,.Frequency,-1,gx,freq_y,gw,small_h,freq_max,CYAN)
     text(a,graph_time_axis_label(a),x,freq_y+small_h+time_axis_h,12,MUTED)
@@ -369,11 +395,12 @@ cpu_dashboard :: proc(a:^App) {
         divider_x:=x+f32(col)*(cell_w+gap)-gap/2
         rect(a,divider_x,core_y-offset,1,f32(rows)*cell_h-24,LINE)
     }
-    for core,i in m.physical_cores[:m.physical_core_count] {
+    for index,i in core_indices[:core_count] {
+        core:=m.physical_cores[index]
         cx,cy,cw,ch:=x+f32(i%cols)*(cell_w+gap),core_y+f32(i/cols)*cell_h-offset,cell_w,cell_h-24
         if cy+ch<viewport_top||cy>viewport_bottom {continue}
         current:=CPU_Core_Sample{lower=core.busy_lower,upper=core.busy_upper,frequency_mhz=core.frequency_mhz,frequency_available=core.frequency_available}
-        if s!=nil {current=s.cores[i]}
+        if s!=nil {current=s.cores[index]}
         busy_color:=utilization_color(current.lower) if ready else TEXT
         logical:=m.cores
         if s!=nil {logical=s.logical}
@@ -384,7 +411,7 @@ cpu_dashboard :: proc(a:^App) {
         // Spend additional row height on the plot, keeping the sibling bars
         // and the divider's bottom together instead of growing empty space.
         core_plot_h:=cell_h-f32(89+siblings*21)
-        cpu_plot(a,.Busy,i,cx,cy+64,cw,core_plot_h,100,PURPLE,band=true)
+        cpu_plot(a,.Busy,index,cx,cy+64,cw,core_plot_h,100,PURPLE,band=true)
         for j in 0..<core.logical_count {
             id:=core.logical_ids[j]
             yy:=cy+64+core_plot_h+22+f32(j)*21

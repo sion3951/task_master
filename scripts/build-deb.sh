@@ -98,7 +98,7 @@ import pathlib, sys
 output, version, architecture, maintainer, size, dependencies = sys.argv[1:]
 # GLFW loads these backends with dlopen rather than recording DT_NEEDED, so
 # shlibdeps cannot infer them from its ELF imports. Retain both display paths.
-runtime = ['libvulkan1', 'openssh-client', 'libcap2-bin', 'libx11-6', 'libxi6',
+runtime = ['libvulkan1', 'openssh-client', 'libcap2-bin', 'curl', 'ca-certificates', 'libx11-6', 'libxi6',
            'libxrandr2', 'libxcursor1', 'libxinerama1', 'libx11-xcb1',
            'libwayland-client0', 'libwayland-cursor0', 'libwayland-egl1',
            'libxkbcommon0 (>= 0.5.0)', 'libdecor-0-0']

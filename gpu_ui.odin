@@ -34,6 +34,14 @@ gpu_cache_sample :: proc(s:Persistence_Sample,m:^Metrics,latest:bool)->GPU_Sampl
         utilization_available=m.gpu_count>0&&g.utilization_available,
         memory_available=m.gpu_count>0&&g.memory_available,unified_memory=g.unified_memory,recorded=true,legacy=true}
 }
+gpu_sample_valid :: proc(s:GPU_Sample)->bool {
+    return remote_nonnegative(s.utilization)&&s.utilization<=100&&
+        remote_nonnegative(s.memory_percent)&&s.memory_percent<=100&&
+        remote_nonnegative(s.power_watts)&&remote_nonnegative(s.frequency_mhz)&&remote_nonnegative(s.temperature)&&
+        remote_nonnegative(s.power_max_watts)&&(!s.power_max_available||s.power_max_watts>0)&&
+        remote_nonnegative(s.fan_percent)&&s.fan_percent<=100&&(s.unified_memory||s.memory_used<=s.memory_total)
+}
+
 gpu_plot_value :: proc(s:^GPU_Sample,kind:GPU_Plot)->(f32,bool) {
     switch kind {
     case .Utilization:return s.utilization,s.utilization_available
@@ -59,8 +67,9 @@ gpu_plot :: proc(a:^App,kind:GPU_Plot,x,y,w,h,ceiling:f32,render_pass:Graph_Pass
     first:=(a.history_next-a.history_count+HISTORY_CAPACITY)%HISTORY_CAPACITY
     for i in 1..<a.history_count {
         prev,next:=graph_plot_sample(a,(first+i-1)%HISTORY_CAPACITY),graph_plot_sample(a,(first+i)%HISTORY_CAPACITY)
-        v0,ok0:=gpu_plot_value(&prev.gpu,kind)
-        v1,ok1:=gpu_plot_value(&next.gpu,kind)
+        pg,ng:=gpu_device_sample(a,prev),gpu_device_sample(a,next)
+        v0,ok0:=gpu_plot_value(pg,kind)
+        v1,ok1:=gpu_plot_value(ng,kind)
         dt:=f32(next.timestamp-prev.timestamp)
         if !ok0||!ok1||!history_segment_contiguous(prev,next) {continue}
         p0,p1:=history_position(a,(first+i-1)%HISTORY_CAPACITY),history_position(a,(first+i)%HISTORY_CAPACITY)
@@ -69,13 +78,13 @@ gpu_plot :: proc(a:^App,kind:GPU_Plot,x,y,w,h,ceiling:f32,render_pass:Graph_Pass
         m0,m1:=slope,slope
         if i>1 {
             before:=graph_plot_sample(a,(first+i-2)%HISTORY_CAPACITY)
-            value,available:=gpu_plot_value(&before.gpu,kind)
+            value,available:=gpu_plot_value(gpu_device_sample(a,before),kind)
             before_dt:=f32(prev.timestamp-before.timestamp)
             if available&&history_segment_contiguous(before,prev) {m0=cpu_curve_slope((v0-value)/before_dt,slope,before_dt,dt)}
         }
         if i+1<a.history_count {
             after:=graph_plot_sample(a,(first+i+1)%HISTORY_CAPACITY)
-            value,available:=gpu_plot_value(&after.gpu,kind)
+            value,available:=gpu_plot_value(gpu_device_sample(a,after),kind)
             after_dt:=f32(after.timestamp-next.timestamp)
             if available&&history_segment_contiguous(next,after) {m1=cpu_curve_slope(slope,(value-v1)/after_dt,dt,after_dt)}
         }
@@ -90,11 +99,11 @@ gpu_plot :: proc(a:^App,kind:GPU_Plot,x,y,w,h,ceiling:f32,render_pass:Graph_Pass
             value:=cpu_curve_value(curve,t)
             xx,yy:=x+w*(p0+(p1-p0)*t),y+h*(1-clamp(value/ceiling,0,1))
             color_value:=value
-            if kind==.Memory {color_value=100*value/f32(f64(prev.gpu.memory_total)/GPU_MEMORY_GB)}
+            if kind==.Memory {color_value=100*value/f32(f64(pg.memory_total)/GPU_MEMORY_GB)}
             tint:=AMBER if kind==.Power else (CYAN if kind==.Frequency else utilization_color(color_value))
             if j>0 {
                 if render_pass==.Fill {
-                    color_scale:=ceiling/f32(f64(prev.gpu.memory_total)/GPU_MEMORY_GB) if kind==.Memory else f32(1)
+                    color_scale:=ceiling/f32(f64(pg.memory_total)/GPU_MEMORY_GB) if kind==.Memory else f32(1)
                     graph_fill_segment(a,last_x,last_y,xx,yy,y+h,last_color,tint,h,kind==.Utilization||kind==.Memory,color_scale)
                 }
                 else {stroke_gradient(a,last_x,last_y,xx,yy,1.6,last_color,tint)}
@@ -108,6 +117,10 @@ gpu_dashboard :: proc(a:^App) {
     m:=&a.metrics
     x,w:=a.content_x,a.width-2*a.content_x
     if w<160 {return}
+    a.clip_active=true;a.clip_top,a.clip_bottom=72,a.height-a.content_x
+    titles:[8]string
+    for &device,i in m.gpus[:m.gpu_count] {titles[i]=string(device.name[:device.name_len])}
+    device_selector(a,&a.selected_gpu,titles[:m.gpu_count],x,79-a.gpu_scroll,w,"No GPU telemetry available")
     compact:=w<700
     stats_cols:=2 if compact else 5
     stats_h:=f32(198) if compact else f32(66)
@@ -128,8 +141,7 @@ gpu_dashboard :: proc(a:^App) {
     offset:=a.gpu_scroll
     a.clip_active=true;a.clip_top,a.clip_bottom=viewport_top,viewport_bottom
     defer a.clip_active=false
-    g:=&m.gpus[0]
-    fit_text(a,string(g.name[:g.name_len]) if m.gpu_count>0 else "No NVIDIA device available",x,99-offset,w,17)
+    g:=&m.gpus[a.selected_gpu]
     first:=(a.history_next-a.history_count+HISTORY_CAPACITY)%HISTORY_CAPACITY
     gx,gy,gw:=x+36,graph_y+header_h-offset,w-36
     power_y:=gy+busy_h+small_h+plot_gap*2
@@ -169,7 +181,7 @@ gpu_dashboard :: proc(a:^App) {
     if slot>=0&&history_position(a,slot)<0 {slot=-1;a.gpu_pinned_slot=-1}
     if slot<0&&a.history_count>0 {slot=(a.history_next+HISTORY_CAPACITY-1)%HISTORY_CAPACITY}
     current:=gpu_sample(g,m.gpu_count>0)
-    if slot>=0 {current=graph_readout_sample(a,&a.cpu_history[slot],hover_slot>=0||a.gpu_pinned_slot>=0,hover_slot>=0&&a.gpu_pinned_slot<0,hover_w).gpu}
+    if slot>=0 {current=gpu_device_sample(a,graph_readout_sample(a,&a.cpu_history[slot],hover_slot>=0||a.gpu_pinned_slot>=0,hover_slot>=0&&a.gpu_pinned_slot<0,hover_w))^}
     detail:="GPU telemetry unavailable. CPU and memory remain live."
     if m.gpu_count>0 {
         memory:=bytes_label(g.memory_total) if g.memory_available else "Memory unavailable"
@@ -199,7 +211,7 @@ gpu_dashboard :: proc(a:^App) {
     frequency_max:=f32(500)
     for i in 0..<a.history_count {
         candidate:=(first+i)%HISTORY_CAPACITY
-        s:=&a.cpu_history[candidate].gpu
+        s:=gpu_device_sample(a,&a.cpu_history[candidate])
         if history_position(a,candidate)<0 {continue}
         if !power_max_known&&s.power_available {power_max=max(power_max,f32(math.ceil(s.power_watts/50))*50)}
         if s.frequency_available {frequency_max=max(frequency_max,f32(math.ceil(s.frequency_mhz/500))*500)}
@@ -212,7 +224,7 @@ gpu_dashboard :: proc(a:^App) {
     memory_max:=max(f32(1),f32(math.ceil(f64(memory_total)/GPU_MEMORY_GB)))
     if g.unified_memory {
         for i in 0..<a.history_count {
-            s:=&a.cpu_history[(first+i)%HISTORY_CAPACITY].gpu
+            s:=gpu_device_sample(a,&a.cpu_history[(first+i)%HISTORY_CAPACITY])
             if s.unified_memory&&s.memory_available {memory_max=max(memory_max,f32(math.ceil(f64(s.memory_used)/GPU_MEMORY_GB)))}
         }
     }
@@ -262,6 +274,7 @@ gpu_dashboard :: proc(a:^App) {
         history_time_label(a,slot,a.gpu_pinned_slot>=0,cursor_x,graph_xs[label_graph],graph_ys[label_graph],graph_ws[label_graph],graph_hs[label_graph])
     }
     graph_controls_draw(a,gx,graph_bottom+time_axis_h+8,gw)
+    if m.gpu_count>1 {fit_text(a,"Processes across all GPUs",x,process_y-12-offset,w,12,MUTED)}
     // Keep the process table's established sorting, PID expansion and scrolling.
     process_panel(a,x-18,process_y-offset,w+36,process_h,gpu=true,unboxed=true)
     if max_scroll>0 {

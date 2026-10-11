@@ -34,9 +34,15 @@ try {
     $collector = Join-Path $output 'task_master-collector.exe'
     Invoke-Checked $Odin @('build', 'build/collector-src', "-out:$collector", '-o:speed', '-vet', '-define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536')
     Invoke-Checked 'dotnet' @('publish', 'sensors/windows/task_master.Sensors.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:RestoreLockedMode=true', '-o', (Join-Path $output 'sensors'))
+    # Bundle the unchanged, pinned and signature-verified driver installer in
+    # both setup and the SSH sensor payload; installing no longer needs GitHub.
+    & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory (Join-Path $output 'sensors') -PrepareDriverOnly
     $sensorArchive = [IO.Path]::GetFullPath('build/task_master-windows-sensors.zip')
-    Compress-Archive -Path (Join-Path $output 'sensors/*') -DestinationPath $sensorArchive -Force
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (Test-Path -LiteralPath $sensorArchive) { Remove-Item -LiteralPath $sensorArchive }
+    [IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $output 'sensors'), $sensorArchive)
     if ($CollectorOnly) { return }
+    if (-not $Version) { $Version = (Get-Content 'VERSION' -Raw).Trim() }
 
     # Require real Linux payloads for the complete desktop. Windows collector-only
     # builds are independent, allowing each OS to publish its own release inputs.
@@ -94,6 +100,7 @@ try {
     # Odin currently targets Windows x64. Windows 11 ARM64 executes this payload
     # through x64 emulation; Linux ARM64 always uses its native Linux collector.
     $defines = @(
+        "-define:TASK_MASTER_VERSION=$Version",
         "-define:TASK_MASTER_WINDOWS_SENSORS=$($sensorArchive.Replace('\','/'))",
         "-define:TASK_MASTER_COLLECTOR_LINUX_AMD64=$($linuxAmd64.Replace('\','/'))",
         "-define:TASK_MASTER_COLLECTOR_LINUX_ARM64=$($linuxArm64.Replace('\','/'))",

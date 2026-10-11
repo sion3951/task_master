@@ -22,6 +22,7 @@ Remote_Snapshot :: struct {
     cpu_frequency_available, cpu_power_available: bool,
     cpu_frequency_source: CPU_Frequency_Source,
     cpu_power_source: CPU_Power_Source,
+    cpu_package_power: []CPU_Package_Power,
     cpu_power_error: string,
     cpu_power_permission_denied: bool,
     memory_total, memory_used, memory_available, swap_total, swap_used: u64,
@@ -59,6 +60,7 @@ metrics_display_copy :: proc(m,source:^Metrics) {
     m.cpu_frequency_mhz,m.cpu_power_watts=source.cpu_frequency_mhz,source.cpu_power_watts
     m.cpu_frequency_available,m.cpu_power_available=source.cpu_frequency_available,source.cpu_power_available
     m.cpu_frequency_source,m.cpu_power_source=source.cpu_frequency_source,source.cpu_power_source
+    m.cpu_package_power=source.cpu_package_power;m.cpu_package_power_count=source.cpu_package_power_count
     m.cpu_power_error=source.cpu_power_error;m.cpu_power_error_len=source.cpu_power_error_len
     m.cpu_power_permission_denied=source.cpu_power_permission_denied
     m.memory_total,m.memory_used,m.memory_available=source.memory_total,source.memory_used,source.memory_available
@@ -99,6 +101,7 @@ remote_encode :: proc(m: ^Metrics) -> ([]u8, bool) {
         cpu_frequency_mhz = m.cpu_frequency_mhz, cpu_power_watts = m.cpu_power_watts,
         cpu_frequency_available = m.cpu_frequency_available,
         cpu_power_available = m.cpu_power_available,
+        cpu_package_power=m.cpu_package_power[:m.cpu_package_power_count],
         cpu_frequency_source = m.cpu_frequency_source, cpu_power_source = m.cpu_power_source,
         cpu_power_error = string(m.cpu_power_error[:m.cpu_power_error_len]),
         cpu_power_permission_denied = m.cpu_power_permission_denied,
@@ -167,7 +170,7 @@ remote_decode :: proc(data: []u8, m: ^Metrics, require_controls:bool=false) -> b
     if json.unmarshal(data, &s, allocator = context.temp_allocator) != nil { return false }
     if require_controls&&s.version!=REMOTE_PROTOCOL_VERSION {return false}
     if (s.version != REMOTE_PROTOCOL_VERSION && s.version != 4 && s.version != 3) || len(s.hostname) > len(m._hostname) || len(s.cpu_model) > len(m._cpu_model) ||
-        len(s.cpu_power_error) > len(m.cpu_power_error) ||
+        len(s.cpu_power_error) > len(m.cpu_power_error) || len(s.cpu_package_power)>len(m.cpu_package_power) ||
         s.cpu_count < 0 || s.cpu_count > len(m.cores) || len(s.cores) != s.cpu_count ||
         s.cpu_online_count < 0 || s.cpu_online_count > s.cpu_count || len(s.physical_cores) > len(m.physical_cores) ||
         len(s.processes) > len(m.processes) || len(s.memory_processes) > len(m.memory_processes) ||
@@ -193,6 +196,7 @@ remote_decode :: proc(data: []u8, m: ^Metrics, require_controls:bool=false) -> b
         s.memory_free>s.memory_total||s.memory_cached>s.memory_total||s.memory_buffers>s.memory_total||
         int(s.cpu_frequency_source) < 0 || int(s.cpu_frequency_source) > int(CPU_Frequency_Source.Mixed) ||
         int(s.cpu_power_source) < 0 || int(s.cpu_power_source) > int(CPU_Power_Source.Perf) { return false }
+    for power in s.cpu_package_power {if power.package_id<0||!remote_nonnegative(power.watts) {return false}}
     for x in s.load { if !remote_nonnegative(x) { return false } }
     for x in s.cores { if !remote_nonnegative(x) || x > 100 { return false } }
     for &core in s.physical_cores {
@@ -240,6 +244,7 @@ remote_decode :: proc(data: []u8, m: ^Metrics, require_controls:bool=false) -> b
     m.cpu_frequency_mhz, m.cpu_power_watts = s.cpu_frequency_mhz, s.cpu_power_watts
     m.cpu_frequency_available, m.cpu_power_available = s.cpu_frequency_available, s.cpu_power_available
     m.cpu_frequency_source, m.cpu_power_source = s.cpu_frequency_source, s.cpu_power_source
+    m.cpu_package_power={};copy(m.cpu_package_power[:],s.cpu_package_power);m.cpu_package_power_count=len(s.cpu_package_power)
     m.cpu_power_error_len = copy(m.cpu_power_error[:], s.cpu_power_error)
     m.cpu_power_permission_denied = s.cpu_power_permission_denied
     m.memory_total, m.memory_used, m.memory_available = s.memory_total, s.memory_used, s.memory_available

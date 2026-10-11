@@ -8,7 +8,8 @@
   LHM incorporates hardware modules under their own licenses; preserve the
   upstream package's license notices when redistributing.
 * **PawnIO 2.2.0** official signed driver, copyright namazso and contributors.
-  The installer is downloaded unchanged rather than embedded in task_master.
+  The unchanged official installer is bundled alongside the sensor runtime for
+  offline setup; SHA-256 and Authenticode are verified before packaging and use.
   Official download: https://pawnio.eu
   Pinned binary: https://github.com/namazso/PawnIO.Setup/releases/tag/2.2.0
   Driver source/license: https://github.com/namazso/PawnIO

@@ -157,6 +157,7 @@ persistence_init :: proc(a:^App) {
 
 // The executable is versioned by contents. Windows cannot overwrite a running
 // image; stop gracefully before replacing it, then restart the same user task.
+Persistence_Windows_Runtime_File :: struct {name:string,data:[]u8}
 persistence_install_unit :: proc(a:^App)->(success,updated:bool) {
     executable,executable_error:=os.get_executable_path(context.temp_allocator)
     data_directory,data_error:=os.user_data_dir(context.temp_allocator)
@@ -167,37 +168,49 @@ persistence_install_unit :: proc(a:^App)->(success,updated:bool) {
     if binary_error!=nil {persistence_error_set(a,"Could not read the background executable.");return}
     installed,installed_error:=os.read_entire_file(stable,context.temp_allocator)
     binary_changed:=installed_error!=nil||string(binary)!=string(installed)
+    // Compare dependencies before deciding the stable runtime is up to date.
+    // A missing or updated DLL must be repaired even when the EXE is unchanged.
+    dependencies:=make([dynamic]Persistence_Windows_Runtime_File,context.temp_allocator)
+    slash:=max(strings.last_index_byte(executable,'/'),strings.last_index_byte(executable,'\\'))
+    if slash<0 {persistence_error_set(a,"Could not locate the background executable directory.");return}
+    source_directory:=executable[:slash]
+    files,read_error:=os.read_all_directory_by_path(source_directory,context.temp_allocator)
+    if read_error!=nil {persistence_error_set(a,"Could not enumerate background runtime dependencies.");return}
+    for file in files {
+        if file.type!=.Regular||!(strings.has_suffix(strings.to_lower(file.name,context.temp_allocator),".dll")||strings.has_prefix(file.name,"task_master-sensors")) {continue}
+        data,dependency_error:=os.read_entire_file(fmt.tprintf("%s/%s",source_directory,file.name),context.temp_allocator)
+        if dependency_error!=nil {persistence_error_set(a,"Could not read a background runtime dependency.");return}
+        previous,previous_error:=os.read_entire_file(fmt.tprintf("%s/%s",directory,file.name),context.temp_allocator)
+        if previous_error!=nil||string(previous)!=string(data) {append(&dependencies,Persistence_Windows_Runtime_File{file.name,data})}
+    }
+    // RestartOnFailure.Count is an unsigned byte in the Task Scheduler schema.
     xml:=fmt.tprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
  <RegistrationInfo><Description>task_master background device telemetry</Description></RegistrationInfo>
  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>%s</UserId></LogonTrigger></Triggers>
  <Principals><Principal id="User"><UserId>%s</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
- <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings>
+ <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>false</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>255</Count></RestartOnFailure></Settings>
  <Actions Context="User"><Exec><Command>%s</Command><Arguments>--persistence-service</Arguments><WorkingDirectory>%s</WorkingDirectory></Exec></Actions>
 </Task>`,persistence_windows_sid(),persistence_windows_sid(),persistence_windows_xml_quote(stable),persistence_windows_xml_quote(directory))
     xml_path:=fmt.tprintf("%s/task.xml",directory)
     previous,previous_error:=os.read_entire_file(xml_path,context.temp_allocator)
     task_changed:=previous_error!=nil||string(previous)!=xml
-    if !binary_changed&&!task_changed {return true,false}
+    if !binary_changed&&!task_changed&&len(dependencies)==0 {
+        // Cached files do not prove the task still exists in Task Scheduler.
+        ok,output:=persistence_windows_command(fmt.tprintf("$t=Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue; if ($t) { Write-Output 'registered' }",persistence_windows_ps_quote(persistence_windows_task_name())))
+        if !ok {persistence_error_set(a,fmt.tprintf("Could not inspect the user persistence task: %s",output));return}
+        if output=="registered" {return true,false}
+    }
     if !persistence_windows_stop(a) {return}
     if binary_changed&&!persistence_atomic_write(stable,binary,{.Read_User,.Write_User,.Execute_User}) {persistence_error_set(a,"Could not install the background executable in the user data directory.");return}
-    // Runtime DLLs and sensor/helper resources travel with the stable service.
-    slash:=max(strings.last_index_byte(executable,'/'),strings.last_index_byte(executable,'\\'))
-    if slash>=0 {
-        source_directory:=executable[:slash]
-        files,read_error:=os.read_all_directory_by_path(source_directory,context.temp_allocator)
-        if read_error==nil {
-            for file in files {
-                if file.type!=.Regular||!(strings.has_suffix(strings.to_lower(file.name,context.temp_allocator),".dll")||strings.has_prefix(file.name,"task_master-sensors")) {continue}
-                data,dependency_error:=os.read_entire_file(fmt.tprintf("%s/%s",source_directory,file.name),context.temp_allocator)
-                if dependency_error!=nil||!persistence_atomic_write(fmt.tprintf("%s/%s",directory,file.name),data) {persistence_error_set(a,"Could not copy a background runtime dependency.");return}
-            }
-        }
+    for dependency in dependencies {
+        if !persistence_atomic_write(fmt.tprintf("%s/%s",directory,dependency.name),dependency.data) {persistence_error_set(a,"Could not copy a background runtime dependency.");return}
     }
-    if !persistence_atomic_write(xml_path,transmute([]u8)xml) {persistence_error_set(a,"Could not save the Windows persistence task.");return}
     output:string
-    success,output=persistence_windows_command(fmt.tprintf("Register-ScheduledTask -TaskName %s -Xml ([IO.File]::ReadAllText(%s)) -Force | Out-Null",persistence_windows_ps_quote(persistence_windows_task_name()),persistence_windows_ps_quote(xml_path)))
+    success,output=persistence_windows_command(fmt.tprintf("Register-ScheduledTask -TaskName %s -Xml %s -Force | Out-Null",persistence_windows_ps_quote(persistence_windows_task_name()),persistence_windows_ps_quote(xml)))
     if !success {persistence_error_set(a,fmt.tprintf("Could not register the user persistence task: %s",output));return}
+    // Commit the definition only after registration, so a failed attempt retries.
+    if !persistence_atomic_write(xml_path,transmute([]u8)xml) {success=false;persistence_error_set(a,"Could not save the Windows persistence task.");return}
     updated=true
     return
 }
