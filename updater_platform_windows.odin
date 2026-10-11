@@ -19,8 +19,8 @@ updater_platform_target :: proc()->(Update_Target,string) {
     if directory==""||strings.to_lower(path,context.temp_allocator)!=strings.to_lower(fmt.tprintf("%s/task_master/task_master.exe",directory),context.temp_allocator) {
         return {},"Install the Windows release setup to enable automatic updates. Development builds are updated manually."
     }
-    // The published x64 setup also supports Windows ARM64 through emulation.
-    return Update_Target{os="windows",arch="amd64",kind="windows",executable=executable},""
+    arch := "arm64" when ODIN_ARCH == .arm64 else "amd64"
+    return Update_Target{os="windows",arch=arch,kind="windows",executable=executable},""
 }
 
 updater_platform_install :: proc(target:^Update_Target,package_path,stage:string,parent_pid:i32)->(bool,string) {

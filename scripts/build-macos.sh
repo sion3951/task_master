@@ -10,10 +10,9 @@ Usage: sh scripts/build-macos.sh [--arch native|amd64|arm64|all] [--collector-on
 Default: build both architectures and require all six SSH collector payloads.
 --collector-only builds the requested native macOS collector payloads only.
 --development embeds the payloads currently available instead of requiring all six.
-Environment: ODIN, GLSLC, SIGN_IDENTITY (default ad-hoc), VULKAN_SDK,
- FREETYPE_AMD64 / FREETYPE_ARM64, MOLTENVK_AMD64 / MOLTENVK_ARM64:
- paths to dylibs with the respective architecture and deployment target <=13.
- FREETYPE_LIBRARY / MOLTENVK_LIBRARY provide universal or native fallback dylibs.
+Environment: ODIN, SIGN_IDENTITY (default ad-hoc).
+ Graphics use the system AppKit, Metal, CoreText and CoreGraphics frameworks.
+ No third-party graphics libraries or shader compiler are required.
  INSTALLER_SIGN_IDENTITY signs the .pkg with a Developer ID Installer certificate.
  Full builds also create build/packages/task_master-<version>-<arch>.pkg installers.
 USAGE
@@ -47,11 +46,16 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ "$(uname -s)" = Darwin ] || fail 'Build and sign macOS packages on a Mac with Xcode Command Line Tools.'
-[ -f telemetry.odin ] && [ -f shaders/ui.vert ] || fail 'Run this script from the repository root.'
+[ -f telemetry.odin ] && [ -f shaders/ui.metal ] || fail 'Run this script from the repository root.'
 odin=${ODIN:-odin}
+# Prefer the compiler provisioned by the documented, checksum-verified setup.
+if [ -z "${ODIN:-}" ] && [ -x build/toolchains/odin/odin ]; then odin=build/toolchains/odin/odin; fi
+export ODIN="$odin"
 for tool in "$odin" python3 xcrun; do command -v "$tool" >/dev/null 2>&1 || fail "Required tool not found: $tool"; done
-for tool in clang lipo otool install_name_tool codesign; do xcrun --find "$tool" >/dev/null || fail "Xcode tool not found: $tool"; done
+for tool in clang lipo otool codesign; do xcrun --find "$tool" >/dev/null || fail "Xcode tool not found: $tool"; done
+xcrun --sdk macosx --show-sdk-path >/dev/null
 export MACOSX_DEPLOYMENT_TARGET=13.0
+[ -n "$version" ] || version=${PACKAGE_VERSION:-$(cat VERSION)}
 mkdir -p build
 stage=$(mktemp -d build/macos-stage.XXXXXX)
 trap 'rm -rf "$stage"' EXIT
@@ -63,14 +67,13 @@ cp telemetry*.odin remote_protocol.odin collector/*.odin "$stage/collector-src/"
 for target_arch in $architectures; do
     destination=build/task_master-collector-darwin-$target_arch
     "$odin" build "$stage/collector-src" "-target:darwin_$target_arch" -minimum-os-version:13.0 \
-        "-out:$stage/collector-$target_arch" -o:speed -vet -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536
+        "-out:$stage/collector-$target_arch" -o:speed -vet -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 "-define:TASK_MASTER_VERSION=$version"
     xcrun codesign --force --sign "${SIGN_IDENTITY:--}" "$stage/collector-$target_arch"
     chmod 755 "$stage/collector-$target_arch"
     mv "$stage/collector-$target_arch" "$destination"
     printf 'Ready: %s\n' "$destination"
 done
 $collector_only && exit 0
-[ -n "$version" ] || version=$(cat VERSION)
 numeric_version=$(python3 - "$version" <<'PY'
 import re, sys
 match = re.fullmatch(r'(\d+(?:\.\d+){0,3})(?:[-+~][0-9A-Za-z.+~\-]+)?', sys.argv[1])
@@ -84,38 +87,18 @@ if ! $development; then
     [ -z "$mac_dir" ] || set -- "$@" --mac-dir "$mac_dir"
     sh scripts/build-collectors.sh "$@"
 fi
-glslc=${GLSLC:-glslc}
-if ! command -v "$glslc" >/dev/null 2>&1 && [ -n "${VULKAN_SDK:-}" ] && [ -x "$VULKAN_SDK/bin/glslc" ]; then glslc=$VULKAN_SDK/bin/glslc; fi
-command -v "$glslc" >/dev/null 2>&1 || fail 'Install shaderc (glslc) or set GLSLC/VULKAN_SDK.'
-"$glslc" shaders/ui.vert -o shaders/ui.vert.spv
-"$glslc" shaders/ui.frag -o shaders/ui.frag.spv
-odin_root=$("$odin" root)
 for target_arch in $architectures; do
     case "$target_arch" in
-        amd64) apple_arch=x86_64; free_type=${FREETYPE_AMD64:-${FREETYPE_LIBRARY:-}}; molten_vk=${MOLTENVK_AMD64:-${MOLTENVK_LIBRARY:-}}; brew_prefix=/usr/local ;;
-        arm64) apple_arch=arm64; free_type=${FREETYPE_ARM64:-${FREETYPE_LIBRARY:-}}; molten_vk=${MOLTENVK_ARM64:-${MOLTENVK_LIBRARY:-}}; brew_prefix=/opt/homebrew ;;
+        amd64) apple_arch=x86_64 ;;
+        arm64) apple_arch=arm64 ;;
     esac
-    [ -n "$free_type" ] || free_type=$brew_prefix/opt/freetype/lib/libfreetype.dylib
-    if [ -z "$molten_vk" ]; then
-        for candidate in "${VULKAN_SDK:-}/lib/libMoltenVK.dylib" "${VULKAN_SDK:-}/MoltenVK/dylib/macOS/libMoltenVK.dylib" "${VULKAN_SDK:-}/../MoltenVK/dylib/macOS/libMoltenVK.dylib" "$brew_prefix/opt/molten-vk/lib/libMoltenVK.dylib"; do
-            if [ -f "$candidate" ]; then molten_vk=$candidate; break; fi
-        done
-    fi
-    [ -f "$free_type" ] || fail "Missing $target_arch FreeType dylib; set FREETYPE_$(printf '%s' "$target_arch" | tr '[:lower:]' '[:upper:]')."
-    [ -n "$molten_vk" ] && [ -f "$molten_vk" ] || fail "Missing $target_arch MoltenVK dylib; set MOLTENVK_$(printf '%s' "$target_arch" | tr '[:lower:]' '[:upper:]') or VULKAN_SDK."
-    xcrun lipo "$free_type" -verify_arch "$apple_arch"
-    xcrun lipo "$molten_vk" -verify_arch "$apple_arch"
-    xcrun lipo "$odin_root/vendor/glfw/lib/darwin/libglfw3.a" -verify_arch "$apple_arch"
     output=build/macos-$target_arch
     bundle=$stage/$target_arch/task_master.app
-    mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Frameworks" "$bundle/Contents/Resources/licenses"
+    mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/licenses"
     set -- "$odin" build . "-target:darwin_$target_arch" -minimum-os-version:13.0 \
         "-out:$bundle/Contents/MacOS/task_master" -o:speed -no-bounds-check -vet \
         -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 \
-        "-define:TASK_MASTER_VERSION=$version" \
-        "-collection:task_master_freetype=$(dirname "$free_type")" \
-        "-define:FREETYPE_LIBRARY=task_master_freetype:$(basename "$free_type")" \
-        '-extra-linker-flags:-Wl,-headerpad_max_install_names'
+        "-define:TASK_MASTER_VERSION=$version"
     for payload_os in linux windows darwin; do
         for payload_arch in amd64 arm64; do
             payload=build/task_master-collector-$payload_os-$payload_arch
@@ -130,9 +113,9 @@ for target_arch in $architectures; do
     elif ! $development; then fail 'Missing task_master-windows-sensors.zip for remote sensor installation.'; fi
     "$@"
     cp "build/task_master-collector-darwin-$target_arch" "$bundle/Contents/MacOS/task_master-collector"
-    # Copy/thin transitive dylibs, reject dependencies requiring newer macOS,
-    # and rewrite all non-system references before signing each code item.
-    python3 scripts/package-macos-libraries.py "$bundle" "$apple_arch" "$free_type" "$molten_vk" "${SIGN_IDENTITY:--}"
+    # Native Apple frameworks are supplied by macOS. Reject accidental external
+    # dependencies and deployment targets newer than the macOS 13 baseline.
+    python3 scripts/validate-macos-bundle.py "$bundle" "$apple_arch"
     cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -156,14 +139,6 @@ info['CFBundleVersion'] = sys.argv[2]
 path.write_bytes(plistlib.dumps(info))
 PY
     cp assets/FONT-LICENSE.txt "$bundle/Contents/Resources/licenses/"
-    cp "$odin_root/vendor/glfw/LICENSE.txt" "$bundle/Contents/Resources/licenses/GLFW.txt"
-    # Retain license notices supplied alongside the runtime distributions.
-    free_license=$(dirname "$free_type")/../share/doc/freetype2
-    molten_license=$(dirname "$molten_vk")/../share/molten-vk
-    for license in "$free_license/FTL.TXT" "$free_license/GPLv2.TXT" "$molten_license/LICENSE" "$molten_license/LICENSE.txt"; do
-        if [ -f "$license" ]; then cp "$license" "$bundle/Contents/Resources/licenses/"; fi
-    done
-    if [ -n "${THIRD_PARTY_LICENSE_DIR:-}" ]; then cp -R "$THIRD_PARTY_LICENSE_DIR/." "$bundle/Contents/Resources/licenses/"; fi
     xcrun codesign --force --sign "${SIGN_IDENTITY:--}" "$bundle/Contents/MacOS/task_master-collector"
     xcrun codesign --force --sign "${SIGN_IDENTITY:--}" "$bundle"
     xcrun codesign --verify --strict "$bundle"

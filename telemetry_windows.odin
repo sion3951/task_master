@@ -75,13 +75,19 @@ Windows_Sensor_Snapshot :: struct #packed {
     frequencies:[256]f32,
     error:[384]u8,
     error_len:u32,
+    gpu_magic,gpu_version,gpu_count,gpu_reserved:u32,
+    gpus:[8]Windows_GPU_Sensor,
 }
-#assert(size_of(Windows_Sensor_Snapshot)==1444)
+#assert(size_of(Windows_Sensor_Snapshot)==2484)
 CPU_Power_Domain :: struct { _unused:u8 }
 Windows_Sampler :: struct {
     query:rawptr,
     busy,frequency,queue,free,standby_core,standby_normal,standby_reserve,modified:rawptr,
     network_rx,network_tx,disk_read,disk_write,gpu_memory,gpu_engine:rawptr,
+    gpu_adapter_memory,gpu_adapter_shared,gpu_shared_memory:rawptr,
+    gpu_adapters:[8]Windows_GPU_Adapter,
+    gpu_sensors:[8]Windows_GPU_Sensor,
+    gpu_sensor_count:int,
     pdh_buffer,process_buffer,topology_buffer,service_buffer:[dynamic]u64,
     services:[dynamic]i32,
     groups:[16]int,
@@ -165,7 +171,10 @@ metrics_init_cpu :: proc(m:^Metrics) {
     w.disk_read=windows_counter_add(w,"\\PhysicalDisk(_Total)\\Disk Read Bytes/sec")
     w.disk_write=windows_counter_add(w,"\\PhysicalDisk(_Total)\\Disk Write Bytes/sec")
     w.gpu_memory=windows_counter_add(w,"\\GPU Process Memory(*)\\Dedicated Usage")
+    w.gpu_shared_memory=windows_counter_add(w,"\\GPU Process Memory(*)\\Shared Usage")
     w.gpu_engine=windows_counter_add(w,"\\GPU Engine(*)\\Utilization Percentage")
+    w.gpu_adapter_memory=windows_counter_add(w,"\\GPU Adapter Memory(*)\\Dedicated Usage")
+    w.gpu_adapter_shared=windows_counter_add(w,"\\GPU Adapter Memory(*)\\Shared Usage")
     metrics_refresh_cpu_topology(m)
     metrics_cpu_power_error(m,"Windows sensor helper unavailable; install task_master Sensors for CPU package power")
     w.load_last=time.tick_now()
@@ -247,7 +256,7 @@ telemetry_cpu_frequency :: proc(m:^Metrics,cpu:int)->(f32,CPU_Frequency_Source) 
 }
 metrics_sample_cpu_power :: proc(m:^Metrics,elapsed:f64) {
     w:=windows_sampler(m)
-    m.cpu_power_available=false;w.sensor_clocks_valid=false;w.sensor_clocks={}
+    m.cpu_power_available=false;w.sensor_clocks_valid=false;w.sensor_clocks={};w.gpu_sensor_count=0
     path:=windows_wide("\\\\.\\pipe\\task_master_sensors-v1")
     pipe:=windows.CreateFileW(cstring16(raw_data(path)),windows.GENERIC_READ,0,nil,windows.OPEN_EXISTING,windows.FILE_FLAG_OVERLAPPED,nil)
     if pipe==windows.INVALID_HANDLE_VALUE {
@@ -273,7 +282,7 @@ metrics_sample_cpu_power :: proc(m:^Metrics,elapsed:f64) {
         completed=windows.GetOverlappedResult(pipe,&overlapped,&count,false)!=false
     }
     now:=GetTickCount64()
-    if !completed||count!=u32(size_of(packet))||packet.magic!=0x544d5753||packet.version!=1||packet.core_count>256||packet.error_len>384||packet.uptime_ms>now||now-packet.uptime_ms>5000 {
+    if !completed||(count!=1444&&count!=u32(size_of(packet)))||packet.magic!=0x544d5753||packet.version!=1||packet.core_count>256||packet.error_len>384||packet.uptime_ms>now||now-packet.uptime_ms>5000 {
         metrics_cpu_power_error(m,"Windows sensor helper returned an invalid or stale snapshot")
         return
     }
@@ -285,6 +294,9 @@ metrics_sample_cpu_power :: proc(m:^Metrics,elapsed:f64) {
     }
     for frequency,index in packet.frequencies[:packet.core_count] {
         if windows_finite(frequency)&&frequency>0 {w.sensor_clocks[index]=frequency;w.sensor_clocks_valid=true} else {w.sensor_clocks[index]=0}
+    }
+    if count==u32(size_of(packet))&&packet.gpu_magic==0x544d4750&&packet.gpu_version==1&&packet.gpu_count<=8 {
+        w.gpu_sensors=packet.gpus;w.gpu_sensor_count=int(packet.gpu_count)
     }
 }
 metrics_sample_memory :: proc(m:^Metrics) {
@@ -404,35 +416,59 @@ metrics_gpu_process_details :: proc(m:^Metrics,process:^Process_Metric) {
 }
 windows_gpu_processes :: proc(m:^Metrics,output:[]GPU_Process_Memory)->int {
     w:=windows_sampler(m)
-    items,ok:=windows_counter_array(w,w.gpu_memory)
-    if !ok {return -1}
-    count:=0
-    // One counter instance is one PID/adapter. Sum across adapters only once;
-    // the NVML compute/graphics lists are replaced, preventing WDDM double counts.
-    for item in items {
-        if item.status>1||!windows_finite(item.value)||item.value<0 {continue}
-        buffer:[512]u8
-        name:=windows_wide_name(item.name,buffer[:])
-        if !strings.has_prefix(name,"pid_") {continue}
-        pid:=i32(telemetry_uint(name[4:]))
-        if pid<=0 {continue}
-        if count>=len(output) {m.process_group_overflow=true;break}
-        output[count]={pid=pid,memory=u64(item.value),available=true};count+=1
+    m.gpu_process_memory_shared=false
+    for g in m.gpus[:m.gpu_count] {m.gpu_process_memory_shared=m.gpu_process_memory_shared||g.unified_memory}
+    instances:[dynamic]Windows_GPU_Process_Instance
+    defer delete(instances)
+    memory_ok:=false
+    // Join dedicated/shared streams by PID + adapter LUID + physical GPU.
+    // Unified adapters include their reserved and shared RAM allocations;
+    // discrete adapters retain dedicated VRAM semantics.
+    for counter,index in ([2]rawptr{w.gpu_memory,w.gpu_shared_memory}) {
+        items,ok:=windows_counter_array(w,counter)
+        if !ok {continue}
+        if index==0||m.gpu_process_memory_shared {memory_ok=true}
+        for item in items {
+            buffer:[512]u8
+            identity,valid:=windows_gpu_process_identity(w,windows_wide_name(item.name,buffer[:]))
+            if !valid {continue}
+            unified:=identity.slot>=0&&m.gpus[identity.slot].unified_memory
+            if index==1&&!unified {continue}
+            entry:=windows_gpu_process_instance(&instances,identity,len(output))
+            if entry==nil {m.process_group_overflow=true;continue}
+            measured:=item.status<=1&&windows_finite(item.value)&&item.value>=0&&item.value<f64(max(u64))
+            if index==0 {
+                entry.dedicated_available=measured
+                if measured {entry.dedicated=u64(item.value)}
+            } else {
+                entry.shared_available=measured
+                if measured {entry.shared=u64(item.value)}
+            }
+        }
     }
-    // Processes using only shared GPU memory still belong in the GPU list.
-    // Add each active PID once with measured zero dedicated memory.
-    count=metrics_reduce_gpu_processes(output[:count],sum_memory=true)
+    // Active engines retain membership even if a memory counter is missing.
+    // Such instances have unknown bytes, rather than a fabricated zero.
     engines,engine_ok:=windows_counter_array(w,w.gpu_engine)
     if engine_ok {for item in engines {
         if item.status>1||!windows_finite(item.value)||item.value<=0 {continue}
         buffer:[512]u8
-        name:=windows_wide_name(item.name,buffer[:])
-        if !strings.has_prefix(name,"pid_") {continue}
-        pid:=i32(telemetry_uint(name[4:]));if pid<=0 {continue}
-        found:=false
-        for process in output[:count] {if process.pid==pid {found=true;break}}
-        if !found&&count<len(output) {output[count]={pid=pid,available=true};count+=1}
+        identity,valid:=windows_gpu_process_identity(w,windows_wide_name(item.name,buffer[:]))
+        if valid&&windows_gpu_process_instance(&instances,identity,len(output))==nil {m.process_group_overflow=true}
     }}
+    if !memory_ok&&!engine_ok {return -1}
+    count:=0
+    for entry in instances {
+        unified:=entry.slot>=0&&m.gpus[entry.slot].unified_memory
+        memory:=entry.dedicated
+        available:=entry.dedicated_available
+        if unified {
+            memory+=entry.shared
+            available=entry.shared_available&&(entry.dedicated_available||w.gpu_adapters[entry.slot].dedicated==0)
+        }
+        output[count]={pid=entry.pid,memory=memory,available=available};count+=1
+    }
+    // Shared/dedicated and duplicate engine instances have already been joined.
+    // The caller reduces once across physical adapters and replaces NVML lists.
     return count
 }
 metrics_sample :: proc(m:^Metrics,elapsed:f64) {

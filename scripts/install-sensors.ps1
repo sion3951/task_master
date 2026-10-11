@@ -124,19 +124,23 @@ if ($Remove) {
     exit 0
 }
 
-$source = (Resolve-Path -LiteralPath $SourceDirectory).Path
-if (-not (Test-Path -LiteralPath (Join-Path $source 'task_master.Sensors.exe'))) {
-    throw "Build the self-contained sensor helper before installation: $SourceDirectory"
-}
 # Read the machine architecture directly; avoid starting WMI just for this.
 # The process architecture can be AMD64 under Windows ARM64 emulation.
 $nativeArchitecture = [Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE', 'Machine')
 $nativeArm64 = if ($nativeArchitecture) { $nativeArchitecture -eq 'ARM64' } else {
     @(Get-CimInstance -ClassName Win32_Processor)[0].Architecture -eq 12
 }
+$source = (Resolve-Path -LiteralPath $SourceDirectory).Path
+$architecture = if ($nativeArm64) { 'arm64' } else { 'x64' }
+# Remote archives carry both native runtimes; desktop installers carry one.
+$nativeSource = Join-Path $source $architecture
+if (Test-Path -LiteralPath $nativeSource) { $source = $nativeSource }
+if (-not (Test-Path -LiteralPath (Join-Path $source 'task_master.Sensors.exe'))) {
+    throw "Build the self-contained $architecture sensor helper before installation: $SourceDirectory"
+}
 if ($nativeArm64) {
-    # The desktop/collector work through x64 emulation, but the x64 sensor
-    # driver cannot run in an ARM64 kernel. Keep truthful Windows counters.
+    # LibreHardwareMonitor/PawnIO supports Intel/AMD package sensors. The native
+    # ARM64 helper reports that hardware limitation; Windows counters stay active.
     Write-Host 'Windows ARM64: hardware CPU package sensors are unavailable; native Windows counters remain enabled.'
 } else {
     $installed = Get-PawnIoVersion

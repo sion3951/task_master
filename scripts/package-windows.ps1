@@ -1,7 +1,9 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string] $SourceDirectory = 'build/windows',
+    [ValidateSet('x64', 'arm64')]
+    [string] $Architecture = 'x64',
+    [string] $SourceDirectory,
     [string] $OutputDirectory = 'build/packages',
     [string] $Version,
     [string] $InnoSetupCompiler,
@@ -33,6 +35,7 @@ Push-Location $repository
 try {
     if (-not $Version) { $Version = (Get-Content 'VERSION' -Raw).Trim() }
     if ($Version -notmatch '^[0-9][0-9A-Za-z.+~\-]*$') { throw 'Invalid package version.' }
+    if (-not $SourceDirectory) { $SourceDirectory = if ($Architecture -eq 'x64') { 'build/windows' } else { 'build/windows-arm64' } }
     $source = (Resolve-Path -LiteralPath $SourceDirectory).Path
     foreach ($required in @('task_master.exe', 'task_master-collector.exe', 'sensors/task_master.Sensors.exe',
         'install-windows.ps1', 'install-sensors.ps1', 'README.md', 'licenses/FONT-LICENSE.txt', 'licenses/GLFW.txt')) {
@@ -41,12 +44,22 @@ try {
             throw "Incomplete Windows package: missing or empty $required"
         }
     }
+    # Reject an accidentally mixed package before producing a labelled installer.
+    $expectedMachine = if ($Architecture -eq 'arm64') { 0xaa64 } else { 0x8664 }
+    foreach ($name in @('task_master.exe', 'task_master-collector.exe', 'sensors/task_master.Sensors.exe')) {
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $source $name))
+        if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw "Invalid Windows executable: $name" }
+        $offset = [BitConverter]::ToInt32($bytes, 60)
+        if ($offset -lt 64 -or $offset -gt $bytes.Length - 24 -or [BitConverter]::ToUInt32($bytes, $offset) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes, $offset + 4) -ne $expectedMachine) {
+            throw "Executable architecture does not match $Architecture package: $name"
+        }
+    }
     # Standalone packaging also prepares and verifies the offline driver payload.
     & (Join-Path $PSScriptRoot 'install-sensors.ps1') -SourceDirectory (Join-Path $source 'sensors') -PrepareDriverOnly
     $output = [IO.Path]::GetFullPath($OutputDirectory)
     New-Item -ItemType Directory -Force -Path $output | Out-Null
-    $setup = Join-Path $output "task_master-$Version-windows-x64-setup.exe"
-    & $compiler '/Qp' "/DPayloadDirectory=$source" "/DPackageVersion=$Version" "/O$output" 'packaging/windows/task_master.iss'
+    $setup = Join-Path $output "task_master-$Version-windows-$Architecture-setup.exe"
+    & $compiler '/Qp' "/DPayloadDirectory=$source" "/DPackageVersion=$Version" "/DPackageArchitecture=$Architecture" "/O$output" 'packaging/windows/task_master.iss'
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
     if (-not (Test-Path -LiteralPath $setup) -or (Get-Item -LiteralPath $setup).Length -eq 0) {
         throw "Inno Setup did not produce $setup"

@@ -11,6 +11,13 @@ COLLECTOR_SOURCES := $(wildcard collector/*.odin)
 # Embed available extra payloads in development builds. The release target
 # requires the complete set, so a Windows desktop also retains Linux remotes.
 NATIVE_PAYLOAD_OS := $(shell uname -s | tr A-Z a-z)
+ifeq ($(NATIVE_PAYLOAD_OS),darwin)
+GRAPHICS_SOURCES := shaders/ui.metal
+ODIN_NATIVE_FLAGS := -minimum-os-version:13.0
+else
+GRAPHICS_SOURCES := shaders/ui.vert.spv shaders/ui.frag.spv
+endif
+WINDOW_SOURCES := $(wildcard desktop_window/*.odin)
 NATIVE_PAYLOAD_ARCH := $(shell uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
 EXTRA_PAYLOADS := $(wildcard build/task_master-windows-sensors.zip build/task_master-collector-linux-amd64 build/task_master-collector-linux-arm64 build/task_master-collector-linux-riscv64 build/task_master-collector-windows-amd64 build/task_master-collector-windows-arm64 build/task_master-collector-darwin-amd64 build/task_master-collector-darwin-arm64)
 REMOTE_PAYLOAD_FLAGS := $(foreach arch,$(filter-out $(if $(filter linux,$(NATIVE_PAYLOAD_OS)),$(NATIVE_PAYLOAD_ARCH)),amd64 arm64 riscv64),$(if $(wildcard build/task_master-collector-linux-$(arch)),-define:TASK_MASTER_COLLECTOR_LINUX_$(shell echo $(arch) | tr a-z A-Z)=build/task_master-collector-linux-$(arch)))
@@ -30,16 +37,16 @@ shaders/ui.vert.spv: shaders/ui.vert
 shaders/ui.frag.spv: shaders/ui.frag
 	$(GLSLC) $(GLSLC_FLAGS) $< -o $@
 
-build/task_master: $(wildcard *.odin) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist shaders/ui.vert.spv shaders/ui.frag.spv assets/DejaVuSans.ttf build/task_master-collector $(EXTRA_PAYLOADS)
+build/task_master: $(wildcard *.odin) $(WINDOW_SOURCES) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist $(GRAPHICS_SOURCES) assets/DejaVuSans.ttf build/task_master-collector $(EXTRA_PAYLOADS)
 	mkdir -p build
-	$(ODIN) build . -out:$@ -o:speed -no-bounds-check -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(REMOTE_PAYLOAD_FLAGS)
+	$(ODIN) build . -out:$@ -o:speed -no-bounds-check -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(ODIN_NATIVE_FLAGS) $(REMOTE_PAYLOAD_FLAGS)
 
 # Stage just the shared sampler and protocol; the remote agent has no GLFW or
 # Vulkan dependency and does not require a display server.
-build/task_master-collector: $(TELEMETRY_SOURCES) remote_protocol.odin $(COLLECTOR_SOURCES)
+build/task_master-collector: $(TELEMETRY_SOURCES) remote_protocol.odin $(COLLECTOR_SOURCES) VERSION
 	mkdir -p build/collector-src
 	cp $(TELEMETRY_SOURCES) remote_protocol.odin $(COLLECTOR_SOURCES) build/collector-src/
-	$(ODIN) build build/collector-src -out:$@ -o:speed -vet $(ODIN_MEMORY_FLAGS)
+	$(ODIN) build build/collector-src -out:$@ -o:speed -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(ODIN_NATIVE_FLAGS)
 
 collector: build/task_master-collector
 
@@ -56,13 +63,15 @@ release:
 windows-check: shaders/ui.vert.spv shaders/ui.frag.spv build/task_master-collector
 	$(ODIN) build . -target:windows_amd64 -windows-sdk-root:/tmp -linker:lld -build-mode:obj -use-single-module -vet -out:build/task_master-windows-check.obj
 	$(ODIN) build build/collector-src -target:windows_amd64 -windows-sdk-root:/tmp -linker:lld -build-mode:obj -use-single-module -vet -out:build/collector-windows-check.obj
+	$(ODIN) build . -target:windows_arm64 -windows-sdk-root:/tmp -linker:lld -build-mode:obj -use-single-module -vet -out:build/task_master-windows-arm64-check.obj
+	$(ODIN) build build/collector-src -target:windows_arm64 -windows-sdk-root:/tmp -linker:lld -build-mode:obj -use-single-module -vet -out:build/collector-windows-arm64-check.obj
 
 # Generate both macOS architectures without linking or requiring an Apple SDK.
-macos-check: shaders/ui.vert.spv shaders/ui.frag.spv build/task_master-collector
-	$(ODIN) build . -target:darwin_arm64 -build-mode:obj -use-single-module -vet -out:build/task_master-macos-arm64-check.o
-	$(ODIN) build . -target:darwin_amd64 -build-mode:obj -use-single-module -vet -out:build/task_master-macos-amd64-check.o
-	$(ODIN) build build/collector-src -target:darwin_arm64 -build-mode:obj -use-single-module -vet -out:build/collector-macos-arm64-check.o
-	$(ODIN) build build/collector-src -target:darwin_amd64 -build-mode:obj -use-single-module -vet -out:build/collector-macos-amd64-check.o
+macos-check: shaders/ui.metal build/task_master-collector
+	$(ODIN) build . -target:darwin_arm64 -minimum-os-version:13.0 -build-mode:obj -use-single-module -vet -out:build/task_master-macos-arm64-check.o
+	$(ODIN) build . -target:darwin_amd64 -minimum-os-version:13.0 -build-mode:obj -use-single-module -vet -out:build/task_master-macos-amd64-check.o
+	$(ODIN) build build/collector-src -target:darwin_arm64 -minimum-os-version:13.0 -build-mode:obj -use-single-module -vet -out:build/collector-macos-arm64-check.o
+	$(ODIN) build build/collector-src -target:darwin_amd64 -minimum-os-version:13.0 -build-mode:obj -use-single-module -vet -out:build/collector-macos-amd64-check.o
 
 macos:
 	sh scripts/build-macos.sh $(MACOS_ARGS)
@@ -95,7 +104,7 @@ install: all
 install-remote: build/task_master-collector
 	sh scripts/install.sh remote "$$HOST"
 
-check: shaders/ui.vert.spv shaders/ui.frag.spv build/task_master-collector
+check: $(GRAPHICS_SOURCES) build/task_master-collector
 	$(ODIN) check . -vet
 
 clean:

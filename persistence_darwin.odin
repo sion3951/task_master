@@ -132,7 +132,7 @@ persistence_install_unit :: proc(a:^App)->(success,updated:bool) {
     slash:=strings.last_index_byte(executable,'/')
     if slash<0 {persistence_error_set(a,"Could not locate the background runtime dependencies.");return}
     // Keep the same relative framework layout as the installed .app. The full
-    // executable enters --persistence-service before any GLFW/Vulkan startup.
+    // executable enters --persistence-service before any AppKit/Metal startup.
     source_directory:=executable[:slash]
     frameworks:=fmt.tprintf("%s/../Frameworks",source_directory)
     if os.is_dir(frameworks)&&!persistence_darwin_dependencies(frameworks,fmt.tprintf("%s/Frameworks",directory),&dependencies) {

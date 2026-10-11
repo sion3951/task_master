@@ -3,7 +3,7 @@ package main
 import "core:sync"
 import "core:thread"
 import "core:time"
-import glfw "vendor:glfw"
+import glfw "desktop_window"
 
 // A change owns only immutable command input and detached resources. It never
 // accesses live App/Machine state from a worker.

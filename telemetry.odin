@@ -85,6 +85,14 @@ NVML_API :: struct {
 }
 
 Metrics :: struct {
+    remote_session_id, remote_sequence: u64,
+    remote_source_seconds, remote_sample_interval: f64,
+    remote_collector_version: [64]u8,
+    remote_collector_version_len: int,
+    remote_architecture: [32]u8,
+    remote_architecture_len: int,
+    remote_mode: [16]u8,
+    remote_mode_len: int,
     hostname, cpu_model: string,
     platform: string,
     cpu_percent: f32,
@@ -122,6 +130,7 @@ Metrics :: struct {
     process_group_overflow: bool,
     gpus: [8]GPU_Metric,
     gpu_count: int,
+    // Historical wire field: true when any native GPU backend has devices.
     nvml_available, cpu_available, ram_available: bool,
     gpu_process_memory_shared: bool,
     rates_ready: bool,
@@ -157,6 +166,9 @@ Metrics_Sampler :: struct {
     _nvml_initialized: bool,
     _nvml_retry_after: time.Tick,
     _gpu_devices: [8]rawptr,
+    _gpu_platform: rawptr,
+    _gpu_backends_active: bool,
+    _gpu_nvml_expected: bool,
 }
 
 metrics_cpu_power_status :: proc(m: ^Metrics) -> string {
@@ -193,7 +205,9 @@ telemetry_cstring_len :: proc(buf: []u8) -> int {
 
 metrics_init_devices :: proc(m: ^Metrics) {
     stage:=time.tick_now()
+    m._gpu_backends_active=true
     m.nvml_available=false
+    m.gpu_process_memory_shared=false
     m.gpu_count=0
     m.gpus={}
     when ODIN_OS == .Darwin {
@@ -201,16 +215,26 @@ metrics_init_devices :: proc(m: ^Metrics) {
         metrics_sample(m, 0)
         return
     }
-    metrics_init_nvml(m)
-    stage=startup_stage(stage,"NVML initialization")
+    metrics_init_gpu_backends(m)
+    stage=startup_stage(stage,"GPU telemetry initialization")
     metrics_sample(m, 0)
     stage=startup_stage(stage,"initial telemetry sample")
 }
 
-// Session services can start before the NVIDIA driver is ready. Retry just
+metrics_init_gpu_backends :: proc(m: ^Metrics) {
+    m.gpu_process_memory_shared=false
+    m._gpu_nvml_expected=false
+    when ODIN_OS == .Linux { metrics_linux_destroy_gpus(m) }
+    metrics_init_nvml(m)
+    when ODIN_OS == .Linux { metrics_linux_init_gpus(m) }
+    when ODIN_OS == .Windows { metrics_windows_init_gpus(m) }
+    m.nvml_available = m.gpu_count > 0
+}
+
+// Session services can start before the graphics driver is ready. Retry just
 // device discovery, retaining the CPU/process counter baselines and history.
 metrics_init_nvml :: proc(m: ^Metrics) {
-    metrics_suspend_devices(m)
+    metrics_suspend_nvml(m)
     m.nvml_available=false;m.gpu_count=0;m.gpus={};m._gpu_devices={}
     m._nvml_retry_after=time.tick_add(time.tick_now(),5*time.Second)
     library := "libnvidia-ml.so.1"
@@ -240,7 +264,7 @@ metrics_init_nvml :: proc(m: ^Metrics) {
         }
     }
     if m.gpu_count==0 {
-        metrics_suspend_devices(m)
+        metrics_suspend_nvml(m)
         m.nvml_available=false
     }
 }
@@ -248,6 +272,13 @@ metrics_init_nvml :: proc(m: ^Metrics) {
 // Cached display readings do not need a second live telemetry driver. Keep
 // CPU power descriptors/counters so returning to window sampling is immediate.
 metrics_suspend_devices :: proc(m:^Metrics) {
+    if m._sampler==nil {return}
+    m._gpu_backends_active=false
+    when ODIN_OS == .Linux { metrics_linux_destroy_gpus(m) }
+    metrics_suspend_nvml(m)
+}
+
+metrics_suspend_nvml :: proc(m:^Metrics) {
     if m._sampler==nil {return}
     if m._nvml_initialized&&m._nvml.shutdown!=nil {_=m._nvml.shutdown()}
     if m._nvml.__handle!=nil {_=dynlib.unload_library(m._nvml.__handle)}
@@ -504,7 +535,7 @@ metrics_sample_gpu :: proc(m: ^Metrics) {
     m.gpu_total_processes, m.gpu_total_groups = 0, 0
     for &slot in m._gpu_group_table {slot=0}
     when ODIN_OS != .Darwin {
-        if (!m.nvml_available||m.gpu_count==0)&&time.tick_since(m._nvml_retry_after)>=0 {metrics_init_nvml(m)}
+        if (m.gpu_count==0||m._gpu_nvml_expected&&!m._nvml_initialized)&&time.tick_since(m._nvml_retry_after)>=0 {metrics_init_gpu_backends(m)}
     }
     when ODIN_OS != .Windows { if !m.nvml_available { return } }
     // Enough for both 128-entry NVML lists on each of the eight supported GPUs.
@@ -513,6 +544,7 @@ metrics_sample_gpu :: proc(m: ^Metrics) {
     when ODIN_OS != .Darwin { api := &m._nvml; for i in 0..<m.gpu_count {
         g := &m.gpus[i]
         device := m._gpu_devices[i]
+        if device == nil { continue }
         utilization: NVML_Utilization
         g.utilization_available = api.utilization != nil && api.utilization(device, &utilization) == 0
         if g.utilization_available { g.utilization = f32(utilization.gpu) }
@@ -562,8 +594,10 @@ metrics_sample_gpu :: proc(m: ^Metrics) {
             all_count += 1
         }
     }}
+    when ODIN_OS == .Linux { all_count += metrics_linux_sample_gpus(m, all_processes[all_count:]) }
     when ODIN_OS == .Darwin { all_count = metrics_darwin_sample_gpus(m, all_processes[:]) }
     when ODIN_OS == .Windows {
+        metrics_windows_sample_gpus(m)
         pdh_count := windows_gpu_processes(m, all_processes[:])
         if pdh_count >= 0 { all_count = pdh_count }
     }

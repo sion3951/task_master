@@ -193,7 +193,7 @@ persistence_cache_read :: proc(m:^Machine,live:bool=false)->(cache:Persistence_C
         live&&len(cache.samples)>PERSISTENCE_LIVE_SAMPLES||
         len(cache.snapshot)>REMOTE_MAX_FRAME_BYTES||len(cache.message)>len(m.message)||
         !remote_nonnegative(cache.written_at)||!remote_nonnegative(cache.sampled_at)||!io_summary_valid(cache.io_summary)||
-        int(cache.status)<0||int(cache.status)>int(Connection_Status.Saved) {return}
+        int(cache.status)<0||int(cache.status)>int(Connection_Status.Setup_Required) {return}
     previous:f64=0
     for s in cache.samples {
         if !remote_nonnegative(s.timestamp)||s.timestamp<previous||len(s.cores)>256||len(s.logical)>256||len(s.gpus)>8||len(s.cpu_package_power)>16||
@@ -369,7 +369,7 @@ persistence_config_reconcile :: proc(a:^App)->bool {
     for r in a.machine_saved_records {delete(r.host);delete(r.name);delete(r.collector)}
     clear(&a.machine_saved_records)
     for r in records {
-        if r.hidden||r.host=="" {continue}
+        if r.hidden||r.automatic||r.host=="" {continue}
         name:=r.name;collector:=r.collector
         if name=="" {name=r.host};if collector=="" {collector=DEFAULT_COLLECTOR}
         append(&a.machine_saved_records,Machine_Record{host=strings.clone(r.host),name=strings.clone(name),collector=strings.clone(collector),port=r.port,automatic=r.automatic})
@@ -379,19 +379,50 @@ persistence_config_reconcile :: proc(a:^App)->bool {
         keep:=false
         for r in records {
             collector:=r.collector;if collector=="" {collector=DEFAULT_COLLECTOR}
-            if !r.hidden&&strings.equal_fold(r.host,string(m.host[:m.host_len]))&&r.port==m.port&&collector==string(m.collector[:m.collector_len]) {keep=true;break}
+            if !r.hidden&&!r.automatic&&strings.equal_fold(r.host,string(m.host[:m.host_len]))&&r.port==m.port&&collector==string(m.collector[:m.collector_len]) {keep=true;break}
         }
         if !keep {_=os.remove(persistence_cache_path(m));_=os.remove(persistence_cache_path(m,true));machine_free(m);ordered_remove(&a.machines,i)}
     }
     a.machine_count=len(a.machines)
     for r in records {
-        if r.hidden||r.host==""||machine_find(a,r.host,r.port)>=0 {continue}
+        if r.hidden||r.automatic||r.host==""||machine_find(a,r.host,r.port)>=0 {continue}
         name:=r.name;collector:=r.collector
         if name=="" {name=r.host};if collector=="" {collector=DEFAULT_COLLECTOR}
         _=machine_add(a,r.host,name,collector,save=false,port=r.port,automatic=r.automatic)
     }
     a.machine=a.local_machine.state;a.active_machine=0
     return true
+}
+// A private per-machine request lets the viewer retry one SSH worker without
+// restarting the persistence service and every other machine connection.
+persistence_request_retry :: proc(m:^Machine)->bool {
+    requested:=persistence_wall_time()
+    if !persistence_atomic_write(fmt.tprintf("%s.retry",persistence_cache_path(m)),transmute([]u8)fmt.tprintf("%.9f",requested)) {return false}
+    return true
+}
+persistence_retry_poll :: proc(a:^App) {
+    for m in a.machines {
+        if m==a.local_machine {continue}
+        path:=fmt.tprintf("%s.retry",persistence_cache_path(m))
+        file,error:=persistence_platform_cache_open(path)
+        if error!=nil {continue}
+        buffer:[64]u8
+        count,read_error:=os.read(file,buffer[:])
+        os.close(file)
+        requested:f64
+        if read_error==nil&&count>0&&count<len(buffer)&&json.unmarshal(buffer[:count],&requested,allocator=context.temp_allocator)==nil&&
+            remote_nonnegative(requested)&&requested!=m.retry_requested_at {
+            m.retry_requested_at=requested
+            // Requests are transient commands, not settings to replay at every
+            // service launch. A recent one survives a service startup handoff.
+            age:=persistence_wall_time()-requested
+            if age>=-2&&age<45 {
+                machine_connect(a,m)
+                remote_connection_retry(m.connection)
+            }
+        }
+        _=os.remove(path)
+    }
 }
 persistence_cache_prune :: proc(a:^App,active_publishers:bool=false) {
     directory:=persistence_directory()
@@ -400,12 +431,12 @@ persistence_cache_prune :: proc(a:^App,active_publishers:bool=false) {
     if err!=nil {return}
     for file in files {
         path:=fmt.tprintf("%s/%s",directory,file.name)
-        if !strings.has_suffix(file.name,".json")&&!strings.contains(file.name,".json.tmp-") {continue}
+        if !strings.has_suffix(file.name,".json")&&!strings.contains(file.name,".json.tmp-")&&!strings.has_suffix(file.name,".json.retry") {continue}
         keep:=false
         for m in a.machines[:] {
             full:=persistence_cache_path(m)
             live:=persistence_cache_path(m,true)
-            if path==full||path==live||active_publishers&&
+            if path==full||path==live||path==fmt.tprintf("%s.retry",full)||active_publishers&&
                 (path==fmt.tprintf("%s.tmp-%d",full,os.get_pid())||path==fmt.tprintf("%s.tmp-%d",live,os.get_pid())) {
                 keep=true;break
             }
@@ -414,7 +445,7 @@ persistence_cache_prune :: proc(a:^App,active_publishers:bool=false) {
             for r in a.machine_saved_records {
                 pending:=Machine{port=r.port}
                 pending.host_len=copy(pending.host[:],r.host);pending.collector_len=copy(pending.collector[:],r.collector)
-                if path==persistence_cache_path(&pending)||path==persistence_cache_path(&pending,true) {keep=true;break}
+                if path==persistence_cache_path(&pending)||path==persistence_cache_path(&pending,true)||path==fmt.tprintf("%s.retry",persistence_cache_path(&pending)) {keep=true;break}
             }
         }
         if !keep {_=os.remove(path)}
@@ -485,6 +516,7 @@ persistence_service_main :: proc() {
                 clear(&publications);clear(&live_publications)
                 persistence_publisher_reconcile(publisher,a);persistence_publisher_reconcile(live_publisher,a);persistence_cache_prune(a,true)
             }
+            persistence_retry_poll(a)
             last_config=now
         }
         machines_discovery_poll(a)

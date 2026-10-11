@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:time"
-import glfw "vendor:glfw"
+import glfw "desktop_window"
 
 updater_control :: proc(a:^App,nav_x:f32)->f32 {
     label:="Updates"

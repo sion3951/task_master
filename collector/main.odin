@@ -53,6 +53,14 @@ main :: proc() {
     collector_platform_init()
     m := new(Metrics)
     defer free(m)
+    session_started:=time.tick_now()
+    m.remote_session_id=u64(time.to_unix_nanoseconds(time.now()))~u64(os.get_pid())
+    if m.remote_session_id==0 {m.remote_session_id=1}
+    m.remote_collector_version_len=copy(m.remote_collector_version[:],#config(TASK_MASTER_VERSION,"dev"))
+    m.remote_architecture_len=copy(m.remote_architecture[:],"amd64" if ODIN_ARCH==.amd64 else "arm64" if ODIN_ARCH==.arm64 else "riscv64" if ODIN_ARCH==.riscv64 else "unknown")
+    mode,mode_ok:=os.lookup_env("TASK_MASTER_COLLECTOR_MODE",context.temp_allocator)
+    if !mode_ok||mode!="installed"&&mode!="temporary" {mode="custom"}
+    m.remote_mode_len=copy(m.remote_mode[:],mode)
     metrics_init_cpu(m)
     metrics_init_devices(m)
     defer metrics_destroy(m)
@@ -72,7 +80,9 @@ main :: proc() {
     last_sample := time.tick_now()
     interval:f64=1
     control:Collector_Control
+    m.remote_source_seconds=time.duration_seconds(time.tick_since(session_started))
     for {
+        m.remote_sequence+=1
         data, ok := remote_encode(m)
         if !ok {return}
         written:=collector_write(data)
@@ -84,7 +94,9 @@ main :: proc() {
         // immediately on disconnect, instead of leaving a sampler on the host.
         if !collector_wait(last_sample,&interval,&control) {return}
         now := time.tick_now()
-        metrics_sample(m, time.duration_seconds(time.tick_since(last_sample)))
+        m.remote_sample_interval=time.duration_seconds(time.tick_since(last_sample))
+        metrics_sample(m, m.remote_sample_interval)
+        m.remote_source_seconds=time.duration_seconds(time.tick_diff(session_started,now))
         last_sample = now
         mem.free_all(context.temp_allocator)
     }

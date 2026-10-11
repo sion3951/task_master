@@ -9,7 +9,7 @@ import "core:strings"
 import "core:sync"
 import "core:time"
 import "core:unicode/utf8"
-import glfw "vendor:glfw"
+import glfw "desktop_window"
 
 DEFAULT_COLLECTOR :: "~/.local/bin/task_master-collector"
 Machine_Record :: struct { name, host, collector:string, port:u16, automatic, hidden:bool }
@@ -31,6 +31,9 @@ Machine :: struct {
     persistence_live_stamp:f64,
     setup_verifying, setup_failed:bool,
     setup_started, setup_check_after:time.Tick,
+    setup_message:[512]u8, setup_message_len:int,
+    setup_previous_session:u64,
+    retry_requested_at:f64,
 }
 machine_state_init :: proc(m:^Machine_State) {
     m.cpu_pinned_slot=-1
@@ -83,6 +86,8 @@ machines_destroy :: proc(a:^App) {
     for m in a.machines[:] {machine_free(m)}
     for r in a.machine_saved_records {delete(r.host);delete(r.name);delete(r.collector)}
     delete(a.machine_saved_records)
+    machines_suggestions_clear(a)
+    delete(a.machine_suggestions)
     machine_terminal_destroy(a)
     for r in a.dismissed_machines {delete(r.host)}
     delete(a.dismissed_machines);delete(a.machine_tabs);delete(a.machines)
@@ -120,10 +125,10 @@ machines_save :: proc(a:^App,skip:int=-1)->bool {
         if i==skip||(m!=a.local_machine&&!m.persistent) {continue}
         append(&records,Machine_Record{name=string(m.name[:m.name_len]),host=string(m.host[:m.host_len]),collector=string(m.collector[:m.collector_len]),port=m.port,automatic=m.automatic})
     }
-    // Preserve saved hosts that failed this launch's passwordless check without
-    // putting them in the live machine list or erasing their saved settings.
+    // Preserve settings for records that could not be loaded or were removed
+    // while discovery was running.
     for r in a.machine_saved_records {
-        if machine_find(a,r.host,r.port)<0&&!machine_is_dismissed(a,r.host,r.port) {append(&records,r)}
+        if !r.automatic&&machine_find(a,r.host,r.port)<0&&!machine_is_dismissed(a,r.host,r.port) {append(&records,r)}
     }
     for r in a.dismissed_machines {
         index:=machine_find(a,r.host,r.port)
@@ -163,11 +168,8 @@ machine_add :: proc(a:^App,host,name,collector:string,save:bool=true,persistent:
     if !machine_host_valid(host) {machine_error_set(a,"Enter an SSH alias or user@host (configure ports in SSH config).");return false}
     if !machine_text_valid(name,128)||!machine_text_valid(collector,1024) {machine_error_set(a,"Name or collector path is too long or contains invalid characters.");return false}
     if machine_find(a,host,port)>=0 {machine_error_set(a,"That SSH host is already in the machine list.");return false}
-    if !verified {
-        machines_discovery_candidate(a,host,name,collector,port,persistent=persistent,automatic=automatic)
-        machines_discovery_start(a)
-        return true
-    }
+    // Saving a machine is independent of SSH availability. The connection
+    // worker owns trust/authentication checks and reports the precise failure.
     m:=new(Machine)
     m.name_len=copy(m.name[:],name);m.host_len=copy(m.host[:],host);m.collector_len=copy(m.collector[:],collector)
     m.status=.Saved;m.persistent=persistent;m.automatic=automatic;m.port=port
@@ -185,6 +187,13 @@ machine_add :: proc(a:^App,host,name,collector:string,save:bool=true,persistent:
             first_recent:=persistence_recent_start(cache.samples,persistence_wall_time()-HISTORY_SECONDS)
             cache.samples=cache.samples[first_recent:]
             _=persistence_cache_apply(a,m,cache,restore_snapshot=true)
+        }
+    }
+    for r,i in a.machine_suggestions {
+        if strings.equal_fold(r.host,host)&&r.port==port {
+            delete(r.host);delete(r.name);delete(r.collector)
+            ordered_remove(&a.machine_suggestions,i)
+            break
         }
     }
     a.machine_error_len=0;a.dirty=true
@@ -217,13 +226,26 @@ machines_load :: proc(a:^App) {
         name:=r.name;collector:=r.collector
         if name=="" {name=r.host};if collector=="" {collector=DEFAULT_COLLECTOR}
         append(&a.machine_saved_records,Machine_Record{host=strings.clone(r.host),name=strings.clone(name),collector=strings.clone(collector),port=r.port,automatic=r.automatic})
-        machines_discovery_candidate(a,r.host,name,collector,r.port,automatic=r.automatic)
+        // Older versions saved discovered hosts without an explicit Add PC.
+        // Recheck those as suggestions instead of resuming their collection.
+        if !r.automatic {_=machine_add(a,r.host,name,collector,save=false,port=r.port)}
     }
 }
 machines_candidates_clear :: proc(a:^App) {
     for h in a.machine_login_candidates {delete(h.host);delete(h.name);delete(h.collector)}
     delete(a.machine_login_candidates);a.machine_login_candidates=nil
 }
+machines_suggestions_clear :: proc(a:^App) {
+    for r in a.machine_suggestions {delete(r.host);delete(r.name);delete(r.collector)}
+    clear(&a.machine_suggestions)
+}
+machine_suggestion_add :: proc(a:^App,index:int) {
+    if index<0||index>=len(a.machine_suggestions) {return}
+    r:=a.machine_suggestions[index]
+    if !machine_add(a,r.host,r.name,r.collector,port=r.port) {return}
+    machine_error_set(a,"PC saved. Checking collector; use Setup / fix for installation and permissions.")
+}
+machine_dialog_count :: proc(a:^App)->int {return a.machine_count-1+len(a.machine_suggestions)}
 machines_discovery_candidate :: proc(a:^App,host,name,collector:string,port:u16,persistent:bool=true,automatic:bool=true,select_after:bool=false) {
     if !machine_host_valid(host)||!machine_text_valid(name,128)||!machine_text_valid(collector,1024) {return}
     for h in a.machine_login_candidates {if strings.equal_fold(h.host,host)&&h.port==port {return}}
@@ -239,6 +261,7 @@ machines_discovery_start :: proc(a:^App) {
 }
 machines_discover :: proc(a:^App) {
     if a.machine_login_discovery!=nil {return}
+    machines_suggestions_clear(a)
     for r in a.machine_saved_records {
         if !machine_is_dismissed(a,r.host,r.port) {machines_discovery_candidate(a,r.host,r.name,r.collector,r.port,automatic=r.automatic)}
     }
@@ -261,45 +284,16 @@ machines_discovery_poll :: proc(a:^App) {
     }
     finished:=d.completed==len(d.candidates)
     sync.mutex_unlock(&d.mutex)
-    added_batch:=false
     for h in ready {
-        if machine_is_dismissed(a,h.host,h.port)&&!h.select_after {continue}
-        index:=machine_find(a,h.host,h.port)
-        if index>=0 {
-            m:=a.machines[index]
-            // Offline hosts keep their cached place and name. A temporary
-            // network failure must not erase the user's saved machine order.
-            // Connected workers already provide a more precise current status.
-            if m.automatic&&m.connection==nil {
-                m.message_len=0
-                if h.passed {machine_connect(a,m)}
-                else {m.status=.Disconnected;m.message_len=copy(m.message[:],"Passwordless SSH is currently unavailable. Refresh to check again.")}
-                a.dirty=true
-            }
-            continue
-        }
-        if !h.passed {
-            if h.select_after {machine_error_set(a,"Passwordless SSH failed. Use ssh in a terminal first, then check again.")}
-            continue
-        }
-        if h.select_after {
-            for r,i in a.dismissed_machines {
-                if strings.equal_fold(r.host,h.host)&&r.port==h.port {delete(r.host);ordered_remove(&a.dismissed_machines,i);break}
-            }
-        }
-        if !machine_add(a,h.host,h.name,h.collector,save=false,persistent=h.persistent,port=h.port,automatic=h.automatic,verified=true) {continue}
-        added:=a.machines[a.machine_count-1]
-        added_batch=true
-        added.order_rank=h.rank
-        if !a.machine_order_edited {
-            position:=a.machine_count-1
-            for m,i in a.machines[:] {if i>0&&m.order_rank>h.rank {position=i;break}}
-            machine_move(a,a.machine_count-1,position,save=false)
-        }
-        if h.select_after {machine_select(a,machine_find(a,h.host,h.port))}
+        if !h.passed||machine_is_dismissed(a,h.host,h.port)||machine_find(a,h.host,h.port)>=0 {continue}
+        duplicate:=false
+        for r in a.machine_suggestions {if strings.equal_fold(r.host,h.host)&&r.port==h.port {duplicate=true;break}}
+        if duplicate {continue}
+        // Authentication only makes this a suggestion. Collection and saving
+        // begin when the user explicitly adds the PC.
+        append(&a.machine_suggestions,Machine_Record{host=strings.clone(h.host),name=strings.clone(h.name),collector=strings.clone(h.collector),port=h.port})
         a.dirty=true
     }
-    if added_batch&&!persistence_headless&&!machines_save(a) {machine_error_set(a,"Could not cache discovered machines. Check config directory permissions.");a.machine_menu=true}
     if finished {ssh_login_discovery_destroy(d);a.machine_login_discovery=nil;machines_discovery_start(a);a.dirty=true}
 }
 machine_select :: proc(a:^App,index:int) {
@@ -321,16 +315,18 @@ machine_remove :: proc(a:^App,index:int) {
         machine_error_set(a,"Could not save the machine list.");return
     }
     selected:=a.machines[a.active_machine]
+    removed_name:=strings.clone(string(old.name[:old.name_len]),context.temp_allocator)
     ordered_remove(&a.machines,index);a.machine_count=len(a.machines)
     if selected==old {selected=a.local_machine}
     for m,i in a.machines[:] {if m==selected {machine_select(a,i);break}}
     machine_free(old)
+    machine_error_set(a,fmt.tprintf("Deleted %s from monitored PCs.",removed_name))
 }
 machines_sample :: proc(a:^App,now:f64) {
     if a.persistence_enabled&&!persistence_headless {persistence_reader_poll(a,now)}
     selected:=a.machine;local:=a.local_machine.state
     if !a.persistence_enabled&&!local.paused&&persistence_local_needs_prime {
-        if local.metrics._nvml.__handle==nil {metrics_init_devices(&local.metrics)}
+        if !local.metrics._gpu_backends_active {metrics_init_devices(&local.metrics)}
         else {metrics_sample(&local.metrics,0)}
         local.last_sample=now
         persistence_local_needs_prime=false
@@ -344,7 +340,8 @@ machines_sample :: proc(a:^App,now:f64) {
         c:=m.connection
         if c==nil||!sync.mutex_try_lock(&c.mutex) {continue}
         status_changed:=m.status!=c.status||m.message_len!=c.message_len||m.message!=c.message
-        m.status=c.status;m.message=c.message;m.message_len=c.message_len;m.received=c.received
+        m.status=c.status;m.message=c.message;m.message_len=c.message_len
+        if c.received!=(time.Tick{}) {m.received=c.received}
         sync.mutex_unlock(&c.mutex)
         if !m.state.paused {
             for {
@@ -377,6 +374,29 @@ machines_sample :: proc(a:^App,now:f64) {
     }
 }
 machine_stale :: proc(a:^App,m:^Machine)->bool {return (m.host_len>0||a.persistence_enabled)&&(!m.has_sample||m.status!=.Live||time.duration_seconds(time.tick_since(m.received))>max(3,2*a.interval+1))}
+machine_retry :: proc(a:^App,m:^Machine) {
+    if m==a.local_machine||machine_terminal_busy(a,m) {return}
+    if a.persistence_enabled&&m.persistent&&!persistence_headless {
+        if !persistence_request_retry(m) {machine_error_set(a,"Could not request a retry from the persistence service.");return}
+    } else {
+        machine_connect(a,m)
+        remote_connection_retry(m.connection)
+    }
+    m.status=.Connecting
+    m.message_len=copy(m.message[:],"Retry requested / checking SSH and collector...")
+    m.setup_failed=false
+    a.dirty=true
+}
+machine_connection_state :: proc(m:^Machine)->string {
+    switch m.status {
+    case .Saved: return "Saved PC"
+    case .Connecting: return "Reconnecting" if m.has_sample else "Connecting"
+    case .Disconnected: return "Connection lost / retrying"
+    case .Setup_Required: return "Setup required"
+    case .Live: return "Connected"
+    }
+    return "Unavailable"
+}
 machine_color :: proc(a:^App,m:^Machine)->Color {
     if m.host_len==0&&!a.persistence_enabled {return GREEN};if m.status==.Saved {return MUTED};if m.status==.Disconnected {return RED}
     if machine_stale(a,m) {return AMBER};return GREEN
@@ -391,7 +411,8 @@ machine_status_message :: proc(m:^Machine)->string {
     case .Saved: return "Waiting for the SSH telemetry connection."
     case .Connecting: return "Opening the SSH telemetry connection."
     case .Disconnected: return "SSH connection is unavailable; retrying automatically."
-    case .Live: return "No telemetry sample received."
+    case .Setup_Required: return "Fix SSH access or run Setup, then retry this PC."
+    case .Live: return "Telemetry connected." if m.has_sample else "Waiting for the first measured sample."
     }
     return ""
 }
@@ -403,7 +424,8 @@ machine_connection_draw :: proc(a:^App)->bool {
     if m.has_sample&&!machine_stale(a,m) {return false}
     host:="Local persistence" if m==a.local_machine else string(m.host[:m.host_len])
     if m.port!=0 {host=fmt.tprintf("[%s]:%d",host,m.port) if strings.contains(host,":") else fmt.tprintf("%s:%d",host,m.port)}
-    status:="Saved" if m.status==.Saved else "Connecting" if m.status==.Connecting else "Disconnected" if m.status==.Disconnected else "Stale telemetry" if m.has_sample else "Connected"
+    status:=machine_connection_state(m)
+    if m.status==.Live&&m.has_sample {status="Stale telemetry"}
     color:=machine_color(a,m)
     x,w:=a.content_x,a.width-2*a.content_x
     if m.has_sample {
@@ -545,48 +567,78 @@ machine_dialog_open :: proc(a:^App) {
 }
 machine_dialog_submit :: proc(a:^App) {
     host:=strings.trim_space(string(a.machine_input[0][:a.machine_input_len[0]]))
-    if !machine_host_valid(host) {machine_error_set(a,"Enter an SSH alias or user@host that already works without a password.");return}
+    if !machine_host_valid(host) {machine_error_set(a,"Enter an SSH alias or user@host (configure ports in SSH config).");return}
     existing:=machine_find(a,host)
-    if existing>=0 {machine_select(a,existing);return}
-    machines_discovery_candidate(a,host,host,DEFAULT_COLLECTOR,0,automatic=false,select_after=true)
-    machines_discovery_start(a)
-    machine_error_set(a,"Checking passwordless SSH...")
+    if existing>=0 {
+        a.machine_dialog_scroll=max(0,existing-1)
+        machine_error_set(a,"That PC is already in the list. Use Retry now to reconnect it.")
+        return
+    }
+    if !machine_add(a,host,host,DEFAULT_COLLECTOR,automatic=false) {return}
+    for r,i in a.dismissed_machines {
+        if strings.equal_fold(r.host,host)&&r.port==0 {delete(r.host);ordered_remove(&a.dismissed_machines,i);break}
+    }
+    a.machine_dialog_scroll=max(0,a.machine_count-2)
+    a.machine_input_len[0]=0
+    machine_error_set(a,"PC saved. Checking SSH and collector; use Setup for installation or Terminal to fix SSH access.")
 }
 machine_dialog_bounds :: proc(a:^App)->(x,y,w,h:f32) {
     w=min(760,a.width-32)
-    h=min(540,a.height-32)
+    h=min(620,a.height-32)
     return (a.width-w)/2,max(16,(a.height-h)/2),w,h
 }
-machine_dialog_rows :: proc(a:^App,h:f32)->int {return max(0,int((h-238)/64))}
+machine_dialog_rows :: proc(a:^App,h:f32)->int {return max(0,int((h-238)/82))}
 machine_setup_label :: proc(a:^App,m:^Machine)->string {
-    if machine_terminal_busy(a,m) {return "Setup terminal open"}
+    if machine_terminal_busy(a,m) {return machine_terminal_progress(a,m)}
     if m.setup_verifying {return "Checking telemetry after installation..."}
     if m.setup_failed {
+        if m.setup_message_len>0 {return string(m.setup_message[:m.setup_message_len])}
         if m.state!=nil&&m.state.metrics.cpu_power_permission_denied {return "Telemetry connected / power access still denied"}
         return fmt.tprintf("Setup not verified / %s",machine_status_message(m))
     }
     if m.status==.Live&&!machine_stale(a,m) {
+        if m.message_len>0 {return machine_status_message(m)}
         if m.state!=nil&&m.state.metrics.cpu_power_permission_denied {return "Telemetry working / install power access"}
         return "Working / telemetry connected"
     }
-    if m.status==.Connecting {return "Starting telemetry..."}
-    if m.status==.Saved {return "Passwordless SSH verified / starting telemetry"}
+    if m.status==.Connecting {return machine_status_message(m)}
+    if m.status==.Saved {return "Saved PC / awaiting connection"}
     return machine_status_message(m)
 }
 machine_overlay_handle :: proc(a:^App) {
     if a.machine_dialog {
         if a.click {
             x,y,w,h:=machine_dialog_bounds(a)
+            if !hit(a,x,y,w,h) {
+                a.machine_dialog=false
+                a.click=false
+                a.dirty=true
+                return
+            }
             rows:=machine_dialog_rows(a,h)
-            a.machine_dialog_scroll=clamp(a.machine_dialog_scroll,0,max(0,a.machine_count-1-rows))
+            a.machine_dialog_scroll=clamp(a.machine_dialog_scroll,0,max(0,machine_dialog_count(a)-rows))
             for row in 0..<rows {
                 index:=1+a.machine_dialog_scroll+row
-                if index>=a.machine_count {break}
-                yy:=y+103+f32(row)*64
+                if index>machine_dialog_count(a) {break}
+                yy:=y+103+f32(row)*82
+                if index>=a.machine_count {
+                    if hit(a,x+w-124,yy+12,104,32) {
+                        machine_suggestion_add(a,index-a.machine_count)
+                        a.click=false
+                        return
+                    }
+                    continue
+                }
                 m:=a.machines[index]
+                if hit(a,x+w-113,yy+44,93,26) {
+                    machine_remove(a,index)
+                    a.click=false
+                    return
+                }
+                if hit(a,x+w-293,yy+12,78,32) {machine_retry(a,m)}
                 if hit(a,x+w-207,yy+12,96,32) {machine_terminal_open(a,m,install=true)}
                 else if hit(a,x+w-103,yy+12,83,32) {machine_terminal_open(a,m)}
-                else if hit(a,x+20,yy,w-235,58) {machine_select(a,index);a.machine_dialog=false}
+                else if hit(a,x+20,yy,w-323,76) {machine_select(a,index);a.machine_dialog=false}
             }
             if hit(a,x+20,y+h-93,w-154,34) {a.machine_input_focus=0}
             if hit(a,x+w-124,y+h-93,104,34) {machine_dialog_submit(a)}
@@ -609,6 +661,12 @@ machine_overlay_handle :: proc(a:^App) {
         bottom:=a.content_x+48
         for t in a.machine_tabs {if t.y>a.content_x+28 {bottom=max(bottom,t.y+t.h+8)}}
         if hit(a,a.machine_menu_x+a.machine_menu_w-65,bottom+8,53,23) {machine_remove(a,a.active_machine);a.click=false;return}
+        m:=a.machines[a.active_machine]
+        if m!=a.local_machine {
+            if hit(a,a.machine_menu_x+12,bottom+56,80,25) {machine_retry(a,m);a.click=false;return}
+            if hit(a,a.machine_menu_x+100,bottom+56,74,25) {machine_terminal_open(a,m,install=true);a.click=false;return}
+            if hit(a,a.machine_menu_x+182,bottom+56,86,25) {machine_terminal_open(a,m);a.click=false;return}
+        }
         for t in a.machine_tabs {
             if t.y<=a.content_x+28 {continue}
             if hit(a,t.x+t.w,t.y,32,t.h) {machine_remove(a,t.index);a.click=false;return}
@@ -622,10 +680,11 @@ machine_overlay_draw :: proc(a:^App) {
         m:=a.machines[a.active_machine]
         hidden:=make([dynamic]int,0,a.machine_count,context.temp_allocator)
         for _,i in a.machines[:] {if !machine_inline(a,i) {append(&hidden,i)}}
-        rows:=min(len(hidden),max(1,int((a.height-y-154)/32)))
+        rows:=min(len(hidden),max(1,int((a.height-y-190)/32)))
         a.machine_menu_scroll=clamp(a.machine_menu_scroll,0,max(0,len(hidden)-rows))
         bottom:=y+16+f32(rows)*32
         h:=bottom-y+76
+        if m!=a.local_machine {h+=36}
         if m.message_len>0||a.machine_error_len>0 {h+=44}
         panel(a,x,y,w,h)
         for row in 0..<rows {
@@ -642,19 +701,26 @@ machine_overlay_draw :: proc(a:^App) {
         status:="Local machine"
         if m.host_len>0 {
             status=string(m.host[:m.host_len])
-            age:="Saved SSH host / awaiting telemetry" if m.status==.Saved else "Checking SSH access..." if m.status==.Connecting&&m.connection==nil else "Connecting..." if m.status==.Connecting else "Offline / refresh to check" if m.status==.Disconnected&&m.connection==nil else "Disconnected / retrying" if m.status==.Disconnected else "Connected"
+            age:=machine_connection_state(m)
             if m.has_sample {age=fmt.tprintf("%s / last sample %.0fs ago%s",age,time.duration_seconds(time.tick_since(m.received))," / paused" if m.state.paused else "")}
             fit_text(a,age,x+12,bottom+45,w-24,12,MUTED)
         } else {text(a,"Arrows / A D switch machines",x+12,bottom+45,12,MUTED)}
         fit_text(a,status,x+12,bottom+22,w-90 if m!=a.local_machine else w-24,12,SOFT)
         if m!=a.local_machine {
-            text(a,"Remove",x+w-65,bottom+22,12,MUTED)
+            text(a,"Delete",x+w-65,bottom+22,12,MUTED)
+            panel(a,x+12,bottom+56,80,25)
+            text(a,"Retry now",x+19,bottom+74,12)
+            panel(a,x+100,bottom+56,74,25)
+            text(a,"Setup",x+117,bottom+74,12)
+            panel(a,x+182,bottom+56,86,25)
+            text(a,"Terminal",x+193,bottom+74,12)
         }
         message:=string(m.message[:m.message_len])
         if a.machine_error_len>0 {message=string(a.machine_error[:a.machine_error_len])}
         if len(message)>0 {
-            fit_text(a,message,x+12,bottom+73,w-24,12,AMBER)
-            text(a,"SSH uses your keys, agent and known_hosts.",x+12,bottom+94,12,MUTED)
+            offset:=f32(36) if m!=a.local_machine else f32(0)
+            fit_text(a,message,x+12,bottom+73+offset,w-24,12,AMBER)
+            text(a,"SSH uses your keys, agent and known_hosts.",x+12,bottom+94+offset,12,MUTED)
         }
     }
     if !a.machine_dialog {
@@ -670,40 +736,58 @@ machine_overlay_draw :: proc(a:^App) {
     rect(a,0,0,a.width,a.height,Color{0,0,0,0.70})
     x,y,w,h:=machine_dialog_bounds(a)
     panel(a,x,y,w,h)
-    text(a,"SSH machines",x+20,y+32,20)
+    text(a,"Networked PCs",x+20,y+32,20)
     text(a,"x",x+w-30,y+30,15,MUTED)
-    fit_text(a,"Only machines with verified passwordless SSH appear here.",x+20,y+63,w-164,13,SOFT)
+    fit_text(a,"Choose Add PC to monitor a discovered host, or enter one below.",x+20,y+63,w-164,13,SOFT)
     text(a,"Checking..." if a.machine_login_discovery!=nil else "Refresh",x+w-111,y+68,13,AMBER if a.machine_login_discovery!=nil else TEXT)
     rows:=machine_dialog_rows(a,h)
-    a.machine_dialog_scroll=clamp(a.machine_dialog_scroll,0,max(0,a.machine_count-1-rows))
+    count:=machine_dialog_count(a)
+    a.machine_dialog_scroll=clamp(a.machine_dialog_scroll,0,max(0,count-rows))
     for row in 0..<rows {
         index:=1+a.machine_dialog_scroll+row
-        if index>=a.machine_count {break}
+        if index>count {break}
+        yy:=y+103+f32(row)*82
+        rect(a,x+20,yy,w-40,76,BG)
+        if index>=a.machine_count {
+            r:=a.machine_suggestions[index-a.machine_count]
+            rect(a,x+30,yy+16,5,5,SOFT)
+            fit_text(a,r.name,x+45,yy+22,w-189,14)
+            fit_text(a,"Discovered / available over SSH",x+30,yy+49,w-169,12,SOFT)
+            fit_text(a,r.host,x+30,yy+68,w-60,12,MUTED)
+            panel(a,x+w-124,yy+12,104,32)
+            text(a,"Add PC",x+w-104,yy+34,13)
+            continue
+        }
         m:=a.machines[index]
-        yy:=y+103+f32(row)*64
-        rect(a,x+20,yy,w-40,58,BG)
         rect(a,x+30,yy+16,5,5,machine_color(a,m))
-        fit_text(a,string(m.name[:m.name_len]),x+45,yy+22,w-278,14)
-        fit_text(a,machine_setup_label(a,m),x+30,yy+44,w-250,12,MUTED)
+        fit_text(a,string(m.name[:m.name_len]),x+45,yy+22,w-348,14)
+        panel(a,x+w-293,yy+12,78,32)
+        text(a,"Retry now",x+w-286,yy+34,12,MUTED if machine_terminal_busy(a,m) else TEXT)
+        state:=machine_connection_state(m)
+        if m.has_sample {state=fmt.tprintf("%s / last sample %.0fs ago",state,time.duration_seconds(time.tick_since(m.received)))}
+        fit_text(a,state,x+30,yy+49,w-154,12,machine_color(a,m))
+        fit_text(a,machine_setup_label(a,m),x+30,yy+68,w-154,12,SOFT)
         panel(a,x+w-207,yy+12,96,32)
-        text(a,"Install / fix",x+w-199,yy+34,12,MUTED if machine_terminal_busy(a,m) else TEXT)
+        text(a,"Setup / fix",x+w-199,yy+34,12,MUTED if machine_terminal_busy(a,m) else TEXT)
         panel(a,x+w-103,yy+12,83,32)
         text(a,"Terminal",x+w-93,yy+34,12)
+        panel(a,x+w-113,yy+44,93,26)
+        text(a,"Delete PC",x+w-103,yy+63,12,RED)
     }
-    if a.machine_count==1 {
-        fit_text(a,"Checking saved SSH hosts..." if a.machine_login_discovery!=nil else "No passwordless SSH machines found.",x+20,y+130,w-40,14,SOFT)
-        fit_text(a,"Set up SSH outside task_master, then refresh or check an unlisted host below.",x+20,y+157,w-40,12,MUTED)
-    } else if a.machine_count-1>rows {
-        right_text(a,fmt.tprintf("%d-%d of %d / scroll for more",a.machine_dialog_scroll+1,min(a.machine_count-1,a.machine_dialog_scroll+rows),a.machine_count-1),x+w-20,y+h-140,11,MUTED)
+    if count==0 {
+        fit_text(a,"Discovering SSH hosts..." if a.machine_login_discovery!=nil else "No PCs added yet.",x+20,y+130,w-40,14,SOFT)
+        fit_text(a,"Add an SSH alias or user@host below; connection problems stay visible.",x+20,y+157,w-40,12,MUTED)
+    } else if count>rows {
+        right_text(a,fmt.tprintf("%d-%d of %d / scroll for more",a.machine_dialog_scroll+1,min(count,a.machine_dialog_scroll+rows),count),x+w-20,y+h-140,11,MUTED)
     }
-    fit_text(a,"Install / fix opens a terminal for installation and any administrator password.",x+20,y+h-120,w-40,12,MUTED)
+    fit_text(a,"Setup walks through SSH access, collector installation and sensor permissions.",x+20,y+h-120,w-40,12,MUTED)
     rect(a,x+20,y+h-93,w-154,34,LINE)
     s:=string(a.machine_input[0][:a.machine_input_len[0]])
     fit_text(a,s if len(s)>0 else "Unlisted SSH alias or user@host",x+29,y+h-70,w-179,13,TEXT if len(s)>0 else MUTED)
     cursor_x:=min(x+w-143,x+29+renderer_text_width(&a.renderer,s,13*a.scale)/a.scale)
     rect(a,cursor_x,y+h-85,1,18,SOFT)
     panel(a,x+w-124,y+h-93,104,34)
-    text(a,"Check SSH",x+w-113,y+h-70,13)
+    text(a,"Add PC",x+w-104,y+h-70,13)
     if a.machine_error_len>0 {fit_text(a,string(a.machine_error[:a.machine_error_len]),x+20,y+h-43,w-132,12,AMBER)}
     text(a,"Done",x+w-83,y+h-22,14,MUTED)
 }

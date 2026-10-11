@@ -56,6 +56,9 @@ foreign tm_gpu_cf {
     @(link_name="CFStringGetTypeID") gpu_cf_string_type :: proc()->uint ---
     @(link_name="CFDictionaryGetValue") gpu_cf_value :: proc(rawptr,rawptr)->rawptr ---
     @(link_name="CFNumberGetValue") gpu_cf_number :: proc(rawptr,int,rawptr)->u8 ---
+    @(link_name="CFDataGetTypeID") gpu_cf_data_type :: proc()->uint ---
+    @(link_name="CFDataGetLength") gpu_cf_data_length :: proc(rawptr)->int ---
+    @(link_name="CFDataGetBytePtr") gpu_cf_data_bytes :: proc(rawptr)->[^]u8 ---
     @(link_name="CFArrayGetTypeID") gpu_cf_array_type :: proc()->uint ---
     @(link_name="CFArrayGetCount") gpu_cf_array_count :: proc(rawptr)->int ---
     @(link_name="CFArrayGetValueAtIndex") gpu_cf_array_value :: proc(rawptr,int)->rawptr ---
@@ -66,6 +69,7 @@ gpu_cf_cstring :: proc(value:rawptr,buffer:^u8,size:int,encoding:u32)->b8 {
 Darwin_GPU_Sensors :: struct {
     services:[8]u32,
     registry_ids:[8]u64,
+    memory_totals:[8]u64,
     clocks:[256]f32,
     system_clock:f32,
     gpu_power,gpu_clock,gpu_temperature,gpu_utilization:f32,
@@ -104,15 +108,43 @@ darwin_gpu_property_number :: proc(service:u32,key:cstring)->(f64,bool) {
     value:=darwin_gpu_property(service,key)
     if value==nil {return 0,false}
     defer gpu_cf_release(value)
+    // PCI GPU properties may be OSData (CFData) instead of OSNumber.
+    // macOS Intel and Apple Silicon both store these integer bytes little-endian.
+    if gpu_cf_type(value)==gpu_cf_data_type() {
+        size:=gpu_cf_data_length(value)
+        if size!=4&&size!=8 {return 0,false}
+        bytes:=gpu_cf_data_bytes(value)
+        if bytes==nil {return 0,false}
+        n:u64
+        for i in 0..<size {n|=u64(bytes[i])<<u64(i*8)}
+        return f64(n),n<=9_000_000_000_000_000
+    }
     if gpu_cf_type(value)!=gpu_cf_number_type() {return 0,false}
     n:f64
-    ok:=gpu_cf_number(value,13,&n)!=0&&!math.is_nan(n)&&!math.is_inf(n)&&n>=0
+    ok:=gpu_cf_number(value,13,&n)!=0&&!math.is_nan(n)&&!math.is_inf(n)&&n>=0&&n<=9.0e15
     return n,ok
+}
+darwin_gpu_memory_total :: proc(service:u32)->u64 {
+    entry:=service
+    defer {if entry!=service {_=gpu_release(entry)}}
+    // Intel/AMD drivers can put capacity on the PCI provider rather
+    // than the accelerator. Inspect only this device's parent chain.
+    for _ in 0..<8 {
+        mb,ok:=darwin_gpu_property_number(entry,"VRAM,totalMB")
+        if ok&&mb>0&&mb<9.0e9 {return u64(mb*1024*1024)}
+        parent:u32
+        if gpu_parent(entry,"IOService",&parent)!=0 {break}
+        if entry!=service {_=gpu_release(entry)}
+        entry=parent
+    }
+    return 0
 }
 // Metal's currentAllocatedSize is process-local and recommendedMaxWorkingSetSize
 // is a budget, so neither is substituted for system-wide allocation or VRAM.
 metrics_darwin_init_devices :: proc(m:^Metrics) {
     s:=darwin_gpu_sensors(m)
+    for service in s.services {if service!=0 {_=gpu_release(service)}}
+    s.services={};s.registry_ids={};s.memory_totals={}
     api:Darwin_ObjC
     _,loaded:=dynlib.initialize_symbols(&api,"/usr/lib/libobjc.A.dylib")
     if !loaded||api.selector==nil||api.message==nil {return}
@@ -128,6 +160,7 @@ metrics_darwin_init_devices :: proc(m:^Metrics) {
             utf8:=cast(cstring)api.message(name,api.selector("UTF8String"))
             if utf8!=nil {g.name_len=copy(g.name[:],string(utf8))}
             g.unified_memory=gpu_objc_bool(&api,device,"hasUnifiedMemory")
+            m.gpu_process_memory_shared=m.gpu_process_memory_shared||g.unified_memory
             s.registry_ids[i]=gpu_objc_u64(&api,device,"registryID")
             m.gpu_count+=1
         }
@@ -136,9 +169,11 @@ metrics_darwin_init_devices :: proc(m:^Metrics) {
     if gpu_services(0,gpu_matching("IOAccelerator"),&iterator)==0 {
         defer _=gpu_release(iterator)
         for service:=gpu_next(iterator);service!=0;service=gpu_next(iterator) {
-            id:u64;_=gpu_registry_id(service,&id)
+            id:u64
             slot:=-1
-            for i in 0..<m.gpu_count {if s.registry_ids[i]==id {slot=i;break}}
+            if gpu_registry_id(service,&id)==0&&id!=0 {
+                for i in 0..<m.gpu_count {if s.registry_ids[i]==id {slot=i;break}}
+            }
             // Intel/AMD Metal devices may identify the accelerator's PCI
             // ancestor. Match registry identity rather than enumeration order.
             ancestor:=service
@@ -147,8 +182,10 @@ metrics_darwin_init_devices :: proc(m:^Metrics) {
                 parent:u32
                 if gpu_parent(ancestor,"IOService",&parent)!=0 {break}
                 if ancestor!=service {_=gpu_release(ancestor)}
-                ancestor=parent;_=gpu_registry_id(ancestor,&id)
-                for i in 0..<m.gpu_count {if s.registry_ids[i]==id {slot=i;break}}
+                ancestor=parent
+                if gpu_registry_id(ancestor,&id)==0&&id!=0 {
+                    for i in 0..<m.gpu_count {if s.registry_ids[i]==id {slot=i;break}}
+                }
             }
             if ancestor!=service {_=gpu_release(ancestor)}
             // Metal registry IDs refer to the accelerator on modern drivers.
@@ -157,6 +194,7 @@ metrics_darwin_init_devices :: proc(m:^Metrics) {
             if slot<0 {_=gpu_release(service);continue}
             if s.services[slot]!=0 {_=gpu_release(s.services[slot])}
             s.services[slot]=service
+            s.memory_totals[slot]=darwin_gpu_memory_total(service)
         }
     }
     m.nvml_available=m.gpu_count>0 // Historical flag means GPU backend available.
@@ -255,7 +293,7 @@ metrics_darwin_sample_gpus :: proc(m:^Metrics,processes:[]GPU_Process_Memory)->i
                 total,total_ok:=darwin_gpu_number(stats,"vramTotalBytes")
                 if !used_ok {used,used_ok=darwin_gpu_number(stats,"inUseVidMemoryBytes")}
                 if !total_ok {free,free_ok:=darwin_gpu_number(stats,"vramFreeBytes");if free_ok&&used_ok {total=used+free;total_ok=true}}
-                if !total_ok {mb,mb_ok:=darwin_gpu_property_number(service,"VRAM,totalMB");if mb_ok {total=mb*1024*1024;total_ok=true}}
+                if !total_ok&&s.memory_totals[i]>0 {total=f64(s.memory_totals[i]);total_ok=true}
                 if used_ok&&total_ok&&used<=total {g.memory_used=u64(used);g.memory_total=u64(total);g.memory_available=true}
             }
             gpu_cf_release(stats)

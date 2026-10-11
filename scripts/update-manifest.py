@@ -43,6 +43,7 @@ def build_manifest(args):
         ("linux", "amd64", "appimage", f"task_master-{version}-x86_64.AppImage"),
         ("linux", "arm64", "appimage", f"task_master-{version}-aarch64.AppImage"),
         ("windows", "amd64", "windows", f"task_master-{version}-windows-x64-setup.exe"),
+        ("windows", "arm64", "windows", f"task_master-{version}-windows-arm64-setup.exe"),
         ("darwin", "amd64", "macos", f"task_master-{version}-amd64.pkg"),
         ("darwin", "arm64", "macos", f"task_master-{version}-arm64.pkg"),
     ]

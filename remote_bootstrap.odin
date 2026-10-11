@@ -44,6 +44,15 @@ remote_payload_windows_arm64:=REMOTE_COLLECTOR_WINDOWS_ARM64
 
 Remote_Platform :: enum {Unknown,Linux,Windows,Darwin}
 
+remote_architecture_name :: proc(architecture:string)->string {
+    switch architecture {
+    case "AMD64","amd64","X64","x86_64":return "amd64"
+    case "ARM64","arm64","Arm64","aarch64":return "arm64"
+    case "riscv64":return "riscv64"
+    }
+    return architecture
+}
+
 remote_collector_payload :: proc(platform:Remote_Platform,architecture:string)->[]u8 {
     #partial switch platform {
     case .Linux:
@@ -87,7 +96,7 @@ remote_windows_collector_command :: proc(collector:string)->string {
     return remote_powershell_command(fmt.tprintf(`$ErrorActionPreference='Stop'; $path='%s'; if ($path.StartsWith('~/') -or $path.StartsWith('~\')) {$path=Join-Path $HOME $path.Substring(2)}; $process=Start-Process -FilePath $path -NoNewWindow -Wait -PassThru; exit $process.ExitCode`,escaped))
 }
 
-remote_collector_bootstrap_command :: proc(platform:Remote_Platform,architecture:string,binary_bytes:int,arguments:string="")->string {
+remote_collector_bootstrap_command :: proc(platform:Remote_Platform,architecture:string,binary_bytes:int,arguments:string="",telemetry:bool=false)->string {
     command:string
     if platform==.Windows {
         command=`$ErrorActionPreference='Stop'
@@ -101,11 +110,13 @@ foreach ($candidate in @((Join-Path $env:ProgramFiles 'task_master\task_master-c
         $installed=$candidate;$useInstalled=$true;break
     }
 }
+@TASK_MASTER_WINDOWS_INSTALLED@
 $directory=$null
 $output=$null
 try {
     if (-not $useInstalled) {
         if ($remaining -le 0) {throw 'No compatible installed collector or embedded payload is available. Use Install / fix with a complete release build.'}
+        @TASK_MASTER_WINDOWS_TEMPORARY@
         $directory=Join-Path ([IO.Path]::GetTempPath()) ('task_master-'+[Guid]::NewGuid().ToString('N'))
         [IO.Directory]::CreateDirectory($directory) > $null
         # A session executable must never inherit writable access for other users.
@@ -147,17 +158,20 @@ fi
 installed=
 @TASK_MASTER_INSTALLED@
 if [ -n "$installed" ]; then
+    @TASK_MASTER_UNIX_SKIP_TRANSFER@
     received=$(@TASK_MASTER_RECEIVE@ | wc -c)
     if [ "$received" -ne @TASK_MASTER_BYTES@ ]; then
         echo 'task_master collector transfer was interrupted.' >&2
         exit 1
     fi
+    @TASK_MASTER_UNIX_INSTALLED@
     exec "$installed" @TASK_MASTER_ARGUMENTS@
 fi
 if [ @TASK_MASTER_BYTES@ -eq 0 ]; then
     echo 'No compatible installed collector or embedded payload is available.' >&2
     exit 1
 fi
+@TASK_MASTER_UNIX_TEMPORARY@
 umask 077
 base="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
 directory=$(mktemp -d "$base/task_master-XXXXXX")
@@ -182,7 +196,7 @@ chmod 700 "$directory/collector"
     fi
 done`
     if platform==.Darwin {
-        installed_candidates=`for candidate in '/Applications/task_master.app/Contents/MacOS/task_master-collector' "$HOME/Applications/task_master.app/Contents/MacOS/task_master-collector" '/Applications/task_master.app/Contents/Helpers/task_master-collector' "$HOME/Applications/task_master.app/Contents/Helpers/task_master-collector" /usr/local/libexec/task_master/collector "$HOME/.local/bin/task_master-collector"; do
+        installed_candidates=`for candidate in /usr/local/libexec/task_master/collector "$HOME/.local/bin/task_master-collector" '/Applications/task_master.app/Contents/MacOS/task_master-collector' "$HOME/Applications/task_master.app/Contents/MacOS/task_master-collector" '/Applications/task_master.app/Contents/Helpers/task_master-collector' "$HOME/Applications/task_master.app/Contents/Helpers/task_master-collector"; do
     if [ -x "$candidate" ] && [ "$("$candidate" --protocol-version 2>/dev/null)" = '@TASK_MASTER_PROTOCOL@' ]; then
         installed=$candidate; break
     fi
@@ -210,6 +224,24 @@ task_master_receive() {
 }`
         receive="task_master_receive"
     }
+    // Only telemetry sessions negotiate mode before the transfer. Process
+    // actions retain their exact byte-stream contract and stdout format.
+    windows_installed,windows_temporary,unix_installed,unix_skip_transfer,unix_temporary:string
+    if telemetry {
+        windows_installed=`if ($useInstalled) {[Console]::WriteLine('task_master-mode installed'); $remaining=0; $env:TASK_MASTER_COLLECTOR_MODE='installed'}`
+        windows_temporary=`[Console]::WriteLine('task_master-mode temporary'); $env:TASK_MASTER_COLLECTOR_MODE='temporary'`
+        unix_installed="export TASK_MASTER_COLLECTOR_MODE=installed"
+        unix_skip_transfer=`export TASK_MASTER_COLLECTOR_MODE=installed
+    printf 'task_master-mode installed\n'
+    exec "$installed" @TASK_MASTER_ARGUMENTS@`
+        unix_temporary=`export TASK_MASTER_COLLECTOR_MODE=temporary
+printf 'task_master-mode temporary\n'`
+    }
+    command,_=strings.replace_all(command,"@TASK_MASTER_WINDOWS_INSTALLED@",windows_installed,context.temp_allocator)
+    command,_=strings.replace_all(command,"@TASK_MASTER_WINDOWS_TEMPORARY@",windows_temporary,context.temp_allocator)
+    command,_=strings.replace_all(command,"@TASK_MASTER_UNIX_SKIP_TRANSFER@",unix_skip_transfer,context.temp_allocator)
+    command,_=strings.replace_all(command,"@TASK_MASTER_UNIX_INSTALLED@",unix_installed,context.temp_allocator)
+    command,_=strings.replace_all(command,"@TASK_MASTER_UNIX_TEMPORARY@",unix_temporary,context.temp_allocator)
     command,_=strings.replace_all(command,"@TASK_MASTER_RECEIVER_INIT@",receiver_init,context.temp_allocator)
     command,_=strings.replace_all(command,"@TASK_MASTER_RECEIVE@",receive,context.temp_allocator)
     command,_=strings.replace_all(command,"@TASK_MASTER_INSTALLED@",installed_candidates,context.temp_allocator)

@@ -1,6 +1,8 @@
 #!/bin/sh
 # Runs on the remote host, inside the administrator terminal opened by task_master.
 set -eu
+expected_protocol=${1:-}
+[ -n "$expected_protocol" ] || { echo 'The expected collector protocol is required. Launch Setup / fix from task_master.' >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { echo 'Run this installer as root (normally via sudo).' >&2; exit 1; }
 source_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 case $(uname -s) in
@@ -11,7 +13,7 @@ case $(uname -s) in
             elif command -v yum >/dev/null 2>&1; then yum install -y libcap
             elif command -v pacman >/dev/null 2>&1; then pacman -S --needed --noconfirm libcap
             elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install libcap-progs
-            else echo 'Install the package providing setcap, then retry Install / fix.' >&2; exit 1
+            else echo 'Install the package providing setcap, then retry Setup / fix.' >&2; exit 1
             fi
         fi
         sh "$source_directory/install-system.sh" "$source_directory/collector"
@@ -51,4 +53,6 @@ case $(uname -s) in
     *) echo 'Unsupported remote operating system.' >&2; exit 1 ;;
 esac
 # Check the executable while still privileged; sampling itself drops capabilities.
-/usr/local/libexec/task_master/collector --protocol-version
+actual_protocol=$(/usr/local/libexec/task_master/collector --protocol-version)
+[ "$actual_protocol" = "$expected_protocol" ] || { echo "Installed collector protocol $actual_protocol does not match $expected_protocol. Retry with a matching release build." >&2; exit 1; }
+echo "Durable collector protocol $actual_protocol verified. Fresh telemetry will confirm sensor access."

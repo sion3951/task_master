@@ -7,7 +7,7 @@ import "core:os"
 import "core:strings"
 import "core:time"
 import "core:thread"
-import glfw "vendor:glfw"
+import glfw "desktop_window"
 
 Color :: [4]f32
 BG      :: Color{0, 0, 0, 1}
@@ -165,6 +165,7 @@ App :: struct {
     machine_order_edited: bool,
     machine_login_candidates: [dynamic]SSH_Login_Candidate,
     machine_saved_records: [dynamic]Machine_Record,
+    machine_suggestions: [dynamic]Machine_Record,
     machine_dialog_scroll: int,
     machine_terminal_jobs: [dynamic]Machine_Terminal_Job,
     machine_login_discovery: ^SSH_Login_Discovery,
@@ -864,7 +865,7 @@ main :: proc() {
         else if arg=="--view=memory"||arg=="--view=mem+disk" {initial_view=.Memory}
         else if arg=="--view=overview" {initial_view=.Overview}
         else if arg=="--help" {
-            fmt.println("task_master: native Odin + Vulkan system monitor\nSpace pause machine | F freeze all graphs | 1-4 views | Ctrl+1-9 / arrows / A D machines | + SSH machines | Esc/Q quit\n--view=overview|cpu|gpu|mem+disk  initial view (memory alias supported)\n--remote=SSH_ALIAS  verify passwordless SSH and connect for this session\n--machines  open the SSH machine picker\n--persistence=on|off  enable or stop background sampling and exit\n--version  print the embedded release version\n--check-updates  check and stage the latest signed update without opening a window\n--stats  sample telemetry and exit\n--smoke  open the window, sample for 4 seconds, then exit\n--startup-profile  print startup stage timings\n--capture=path.png  save a real GPU-rendered frame and exit")
+            fmt.printf("task_master: native Odin + %s system monitor\nSpace pause machine | F freeze all graphs | 1-4 views | Ctrl+1-9 / arrows / A D machines | + Networked PCs | Esc/Q quit\n--view=overview|cpu|gpu|mem+disk  initial view (memory alias supported)\n--remote=SSH_ALIAS  connect for this session, retaining connection errors\n--machines  open Networked PCs setup and connection controls\n--persistence=on|off  enable or stop background sampling and exit\n--version  print the embedded release version\n--check-updates  check and stage the latest signed update without opening a window\n--stats  sample telemetry and exit\n--smoke  open the window, sample for 4 seconds, then exit\n--startup-profile  print startup stage timings\n--capture=path.png  save a real GPU-rendered frame and exit\n",renderer_backend_name())
             return
         }
     }
@@ -906,7 +907,13 @@ main :: proc() {
         if a.metrics.cpu_power_permission_denied { fmt.println(platform_power_install_hint()) }
         for i in 0..<a.metrics.gpu_count {
             g:=&a.metrics.gpus[i]
-            fmt.printf("%s | utilization %.0f%% | %.0f C | %.1f W | %s %s / %s\n",string(g.name[:g.name_len]),g.utilization,g.temperature,g.power_watts,"Shared GPU allocations" if g.unified_memory else "VRAM",bytes_label(g.memory_used),bytes_label(g.memory_total))
+            fmt.printf("%s | utilization %s | temperature %s | power %s | clock %s | %s %s\n",string(g.name[:g.name_len]),
+                fmt.tprintf("%.0f%%",g.utilization) if g.utilization_available else "unavailable",
+                fmt.tprintf("%.0f C",g.temperature) if g.temperature_available else "unavailable",
+                fmt.tprintf("%.1f W",g.power_watts) if g.power_available else "unavailable",
+                fmt.tprintf("%.0f MHz",g.frequency_mhz) if g.frequency_available else "unavailable",
+                "Shared GPU allocations" if g.unified_memory else "VRAM",
+                fmt.tprintf("%s / %s",bytes_label(g.memory_used),bytes_label(g.memory_total)) if g.memory_available else "unavailable")
         }
         return
     }
@@ -943,7 +950,7 @@ main :: proc() {
             host:=arg[len("--remote="):]
             existing:=machine_find(a,host)
             if existing>=0 {machine_connect(a,a.machines[existing])}
-            else {machines_discovery_candidate(a,host,host,DEFAULT_COLLECTOR,0,persistent=false,automatic=false);machines_discovery_start(a)}
+            else {_=machine_add(a,host,host,DEFAULT_COLLECTOR,save=false,persistent=false,automatic=false)}
         }
     }
     // The counter baseline was collected during graphics startup. Include that
@@ -961,7 +968,7 @@ main :: proc() {
     stage=startup_stage(stage,"first draw")
     glfw.ShowWindow(a.renderer.window)
     stage=startup_stage(stage,"show window")
-    fmt.printf("First frame: %.0f ms | Vulkan: %s | %d GPUs\n",time.duration_seconds(time.tick_since(boot))*1000,a.renderer.device_name,a.metrics.gpu_count)
+    fmt.printf("First frame: %.0f ms | %s: %s | %d GPUs\n",time.duration_seconds(time.tick_since(boot))*1000,renderer_backend_name(),a.renderer.device_name,a.metrics.gpu_count)
     for !glfw.WindowShouldClose(a.renderer.window) {
         now:=glfw.GetTime()
         if smoke&&now-a.started>=4 {break}

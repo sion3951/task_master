@@ -1,10 +1,11 @@
 # task_master
 
 A native Linux, Windows and macOS system monitor combining the CPU, memory and
-process information you would look for in btop with the NVIDIA information you
-would look for in nvtop. Written in Odin, rendered directly with Vulkan.
+process information you would look for in btop with the GPU information you
+would look for in nvtop. Written in Odin, rendered directly with Metal on macOS
+and Vulkan on Linux and Windows.
 
-## Version 1.0.1
+## Version 1.0.4
 
 - Overview, CPU, GPU and Mem+IO dashboards with live graphs and process tables.
 - Local and SSH-connected machines in one window, with automatic collector deployment.
@@ -13,10 +14,11 @@ would look for in nvtop. Written in Odin, rendered directly with Vulkan.
 - GPU-rendered graphs, display scaling and Linux X11/Wayland support.
 
 Download installers from this repository's **Releases** page: Linux AppImage or
-Debian package (x64/ARM64), Windows x64 setup executable, or macOS package
-(Intel/Apple Silicon). Windows 11 ARM64 uses x64 emulation. The `v1.0.1` tag
+Debian package (x64/ARM64), Windows setup executable, or macOS package
+(Intel/Apple Silicon). Source builds and the installer workflow now provide native
+Windows x64 and ARM64 packages; older x64-only releases use emulation on ARM64. The `v1.0.4` tag
 starts the installer workflow; downloads appear after all builds succeed.
-See the [v1.0.1 release notes](docs/releases/v1.0.1.md) for UI fixes and download
+See the [v1.0.4 release notes](docs/releases/v1.0.4.md) for changes and download
 details, and the installation sections below for platform requirements.
 
 The application name is exactly `task_master`. Debian uses `task-master` for
@@ -53,6 +55,9 @@ to the graph where it was selected; narrow windows retain the label.
 On Linux, requires Odin, GLFW 3.4 or newer, a Vulkan loader/driver, FreeType,
 `glslc` (or `glslangValidator`) and `make`.
 NVIDIA telemetry additionally requires the driver's `libnvidia-ml.so.1`.
+AMD, Intel, Qualcomm Adreno and other DRM GPUs use kernel sysfs and DRM fdinfo
+telemetry without a vendor management library. Available readings depend on
+the kernel driver and permissions.
 
 ```sh
 make
@@ -65,8 +70,8 @@ does not need its source directory at runtime.
 ## Installers and Linux packages
 
 The `Installers` GitHub Actions workflow builds **x64 and ARM64** Linux AppImages
-and `.deb` packages, a Windows x64 setup `.exe` (also runs under Windows 11 ARM64
-emulation), and native Intel/Apple Silicon macOS `.pkg` installers on `v*` tags
+and `.deb` packages, native Windows x64 and ARM64 setup `.exe` installers,
+and native Intel/Apple Silicon macOS `.pkg` installers on `v*` tags
 or from **Run workflow**. Manual runs upload downloadable artifacts; tagged runs
 attach all installers and a combined `SHA256SUMS` to the GitHub release. It first
 builds Linux, Windows and macOS collectors and embeds all six payloads into each desktop, retaining automatic remote deployment.
@@ -110,14 +115,14 @@ private to task_master, so an older system GLFW does not remove functionality.
 notices are included; use `THIRD_PARTY_LICENSE_DIR` for custom dependency notices.
 
 ```sh
-chmod +x task_master-1.0.1-x86_64.AppImage
-./task_master-1.0.1-x86_64.AppImage
+chmod +x task_master-1.0.4-x86_64.AppImage
+./task_master-1.0.4-x86_64.AppImage
 # Or install directly from a terminal:
-./task_master-1.0.1-x86_64.AppImage --install
+./task_master-1.0.4-x86_64.AppImage --install
 # Optional portable launch without installation:
-./task_master-1.0.1-x86_64.AppImage --run
+./task_master-1.0.4-x86_64.AppImage --run
 # Debian/Ubuntu installs power access as part of package configuration:
-sudo apt install ./task_master_1.0.1_amd64.deb
+sudo apt install ./task_master_1.0.4_amd64.deb
 ```
 
 Opening the AppImage starts installation and requests administrator authorization.
@@ -131,7 +136,7 @@ Remove it with `/opt/task_master/AppRun --remove`, or the original AppImage
 with `--remove`; preferences and histories are retained.
 
 AppImages also install or run without FUSE using
-`APPIMAGE_EXTRACT_AND_RUN=1 ./task_master-1.0.1-x86_64.AppImage`
+`APPIMAGE_EXTRACT_AND_RUN=1 ./task_master-1.0.4-x86_64.AppImage`
 (add `--run` for portable use).
 OpenSSH and the user's existing keys/configuration remain on the host.
 Persistence copies packaged libraries/plugins into its stable per-user runtime,
@@ -146,26 +151,30 @@ if you want its private background sampler to stop as well.
 
 ## macOS 13 and newer
 
-The macOS desktop and collector run natively on Apple Silicon and Intel Macs.
+The macOS desktop and collector target Apple Silicon and Intel Macs natively.
 The four views, histories, process grouping/PID expansion, sorting, visibility
 rules, pinning, pause, SSH discovery/connections, process termination and
-persistence share the existing UI. Vulkan rendering runs on the Mac's GPU
-through bundled [MoltenVK](https://github.com/KhronosGroup/MoltenVK/blob/main/Docs/MoltenVK_Runtime_UserGuide.md),
-which translates Vulkan to Metal. A separate Vulkan driver installation is
-unnecessary on the target machine.
+persistence share the existing UI. The graphics stack uses Apple's AppKit
+window/input APIs, direct Metal rendering with a CAMetalLayer, and CoreText /
+CoreGraphics font rasterization. The native bindings and renderer are written
+in Odin. The Mac build has no GLFW, FreeType, Vulkan or MoltenVK dependency.
+Metal shader source is embedded in the executable and compiled by the system
+Metal driver at startup; no external shader files are needed at runtime.
 
-Build on a Mac with [Odin](https://odin-lang.org/docs/install/), Xcode Command
-Line Tools, Python 3, `glslc`, FreeType and MoltenVK. Homebrew provides
-`shaderc`, `freetype` and `molten-vk`; the Vulkan SDK is another MoltenVK/glslc
-source. The build targets macOS 13 explicitly and rejects runtime libraries
-whose deployment target is newer. For older target systems, use libraries
-built for macOS 13 rather than newer-only Homebrew bottles.
+Build on a Mac with [Odin](https://odin-lang.org/docs/install/) `dev-2026-09`,
+Xcode Command Line Tools and Python 3. Mac CI pins this official compiler release
+to avoid October's [Objective-C compiler regression](https://github.com/odin-lang/Odin/issues/7793).
+The build targets macOS 13 explicitly and validates
+both executable architecture and deployment target, rejecting non-system
+runtime dependencies. Both desktop architectures use the Apple SDK and system
+frameworks without third-party graphics libraries or `glslc`.
 
 ```sh
 xcode-select --install
-brew install shaderc freetype molten-vk
+# Install the checksum-verified compiler used by Mac CI:
+sh scripts/ci/setup-odin.sh
 # A native development bundle embeds whichever remote payloads are present:
-sh scripts/build-macos.sh --arch native --development
+ODIN=build/toolchains/odin/odin sh scripts/build-macos.sh --arch native --development
 # Open build/macos-arm64/task_master.app on Apple Silicon, or macos-amd64 on Intel.
 ```
 
@@ -182,21 +191,17 @@ The complete build requires all six collector payloads and the Windows build's
 `task_master-windows-sensors.zip`, keeping every remote
 platform available from either macOS desktop architecture. It produces
 `build/macos-amd64/task_master.app` and `build/macos-arm64/task_master.app`.
-`FREETYPE_AMD64`, `FREETYPE_ARM64`, `MOLTENVK_AMD64` and `MOLTENVK_ARM64`
-accept architecture-specific dylib paths; `FREETYPE_LIBRARY` and
-`MOLTENVK_LIBRARY` accept universal libraries. The defaults search the matching
-Intel/Apple Silicon Homebrew prefix, plus `VULKAN_SDK` for MoltenVK.
-Cross-building a desktop requires dependencies containing that architecture;
-the collector-only build needs no FreeType or MoltenVK. Runtime dependencies
-are copied as real files, thinned, made relocatable and individually signed
-before the app is signed, following Apple's
-[bundle/signing layout](https://developer.apple.com/documentation/xcode/embedding-nonstandard-code-structures-in-a-bundle).
+Both desktop architectures and collectors build with the same Apple SDK;
+`--arch native` builds only the host architecture. The bundle contains the
+executables and font license; macOS supplies the graphics frameworks.
 Builds use ad-hoc signing by default; set `SIGN_IDENTITY` for your signing
-identity. Distribution/notarization is a separate release step. Provide extra
-dependency notices with `THIRD_PARTY_LICENSE_DIR` when packaging custom libraries.
-`make macos-check` typechecks and generates macOS ARM64/x64 desktop and collector
-objects on Linux without executing macOS. It checks source/object compatibility;
-native app signing, launchd, Metal rendering and device telemetry require a Mac.
+identity. Distribution/notarization is a separate release step.
+`make macos-check ODIN=path/to/odin` with the same September compiler generates
+macOS ARM64/x64 desktop and collector objects on Linux without an Apple SDK or
+SPIR-V generation. It checks source/object
+compatibility; native app signing, launchd, Metal shader compilation, rendering
+and device telemetry require a Mac. The native graphics conversion has not yet
+been validated on Mac hardware.
 
 Each full macOS build also produces
 `build/packages/task_master-<version>-amd64.pkg` and/or
@@ -239,8 +244,8 @@ visible while those memory readings show unavailable.
 
 macOS **Persistence** installs `~/Library/LaunchAgents/dev.task_master.persistence.plist`.
 It starts at user login and retains saved SSH connections and graph histories
-after the window closes, without initializing GLFW/Vulkan. Its executable,
-collector and dylibs are copied into a private stable directory under
+after the window closes, without initializing AppKit or Metal. Its executable
+and collector are copied into a private stable directory under
 `~/Library/Application Support/task_master/persistence/`; caches use
 `~/Library/Caches/task_master/persistence/`. Refreshes update the stable runtime
 after graceful shutdown, and disabling Persistence stops SSH children before
@@ -257,12 +262,18 @@ history are retained.
 The Windows build keeps the Odin UI and Vulkan rendering, the four views,
 process grouping/PID expansion, sorting, pinning, visibility rules, pause,
 machine discovery, SSH connections, process termination and persistence.
-The desktop runs as your normal user. NVIDIA device telemetry retains the
-existing NVML feature set; GPU rendering works with any Vulkan-capable driver.
+The desktop runs as your normal user. DXGI enumerates hardware adapters from
+NVIDIA, AMD, Intel, Qualcomm and other vendors. WDDM performance counters supply
+device utilization and dedicated/shared allocations; NVIDIA device telemetry
+retains the existing NVML feature set. GPU rendering works with any
+Vulkan-capable driver.
 As on Linux, sensors depend on what the hardware and driver expose.
 
-Build in a Visual Studio x64 Developer PowerShell with Odin, the Vulkan SDK
-(`glslc` on PATH), .NET SDK 8 or newer, and vcpkg (`VCPKG_ROOT` set).
+Build on an x64 Windows host with Visual Studio C++ x64 **and ARM64** tools,
+the Windows 11 SDK, Git with Git LFS, .NET SDK 8 or newer, and vcpkg
+(`VCPKG_ROOT` set). The patched Odin compiler below emits both architectures.
+The Vulkan SDK supplies `glslc` when available; ARM64 runtime machines need a
+native ARM64 Vulkan loader and graphics driver.
 Full builds also require Inno Setup 6.3 or newer (`ISCC.exe` on PATH,
 in its standard installation directory, or passed with `-InnoSetupCompiler`).
 FreeType and GLFW are linked statically. The font and shaders remain embedded.
@@ -286,20 +297,26 @@ automatic sampling on all three platforms. Build the Windows collector alone wit
 when preparing release inputs on a separate machine.
 
 ```powershell
-.\scripts\build-windows.ps1
-# Or supply an existing static MSVC x64 FreeType library:
+# Build the pinned Odin revision with the Windows ARM64 compiler/runtime patch:
+.\scripts\ci\setup-odin-windows.ps1
+# Both builds embed separate native Windows x64 and ARM64 collectors:
+.\scripts\build-windows.ps1 -Architecture x64
+.\scripts\build-windows.ps1 -Architecture arm64
+# Or supply an existing static MSVC library for the selected architecture:
 .\scripts\build-windows.ps1 -FreeTypeLibrary path\to\freetype.lib
 .\build\windows\task_master.exe
 ```
 
-`build/packages/task_master-<version>-windows-x64-setup.exe` is the Windows
-installer. Double-click it to install the desktop, collector, Start menu shortcut
+`build/packages/task_master-<version>-windows-x64-setup.exe` and
+`build/packages/task_master-<version>-windows-arm64-setup.exe` are the Windows
+installers. Choose the native architecture. Double-click it to install the desktop, collector, Start menu shortcut
 and sensor service. Setup requests administrator authorization and registers
 an uninstaller in Windows Settings. Pass `-Version` to `build-windows.ps1` to
 override `VERSION`; use `scripts/package-windows.ps1` to repackage a built payload.
 
-`build/windows/task_master.exe` is the application executable used internally by
-the installer and remains available for development/portable use. The complete
+`build/windows/task_master.exe` (x64) and `build/windows-arm64/task_master.exe`
+(ARM64) are the application executables used internally by the installers and
+remain available for development/portable use. The complete
 build directory also supports manual installation from Administrator PowerShell:
 
 ```powershell
@@ -307,7 +324,7 @@ build directory also supports manual installation from Administrator PowerShell:
 ```
 
 Installation adds a Start menu shortcut, installs the collector for Windows
-SSH sessions and configures **task_master_sensors**, a read-only CPU sensor
+SSH sessions and configures **task_master_sensors**, a read-only CPU/GPU sensor
 service. It samples on demand and closes hardware handles after clients stop
 requesting data; it does not keep sampling when the UI and persistence are off.
 Complete builds bundle the unchanged official **PawnIO** installer so setup and
@@ -323,7 +340,11 @@ CPU package power and hardware clocks use LibreHardwareMonitor's supported
 Intel/AMD sensors. Driver frequency remains a labelled fallback when measured
 clocks are unavailable. NVIDIA temperature, power, fans, clocks and board memory
 use Windows NVML; WDDM process VRAM comes from Windows GPU performance counters
-because NVML cannot supply that reading under WDDM. Unsupported readings show
+because NVML cannot supply that reading under WDDM. The optional sensor helper
+also supplies available AMD/Intel GPU temperature, power, clocks and fan
+percentage through LibreHardwareMonitor; Qualcomm adapters use Windows GPU
+counters for activity and memory. Integrated adapters use shared GPU allocations
+and process tables label these readings **GPU RAM**. Unsupported readings show
 unavailable rather than zero; aggregate process VRAM is only marked measured
 when all contributing readings are known. Windows GPU counters have documented
 limitations on some driver/OS combinations and require a check on the target
@@ -357,11 +378,15 @@ The collector is installed under `%ProgramFiles%/task_master` or deployed into a
 private temporary directory and removed after disconnect. CPU sensor access
 must be installed on each Windows host where package power is wanted.
 
-The current Odin compiler emits Windows x64 executables. Windows 11 ARM64 uses
-x64 emulation for the desktop/collector; Linux ARM64 collectors are native.
-The chosen CPU sensor provider supports Intel/AMD x64, so native ARM64 CPU watts
-and measured clocks are not provided by it. Other telemetry remains available.
-Native Windows ARM64 builds need upstream Odin target support.
+Windows ARM64 runs the desktop, collector and .NET sensor helper natively.
+The pinned upstream Odin release does not have a Windows ARM64 target;
+`scripts/ci/setup-odin-windows.ps1` applies the versioned compiler/runtime patch
+in `scripts/toolchains/odin-windows-arm64.patch` and builds the x64-host compiler.
+ARM64 builds use native static FreeType, GLFW and screenshot libraries.
+The chosen CPU sensor provider supports Intel/AMD x64, so ARM64 CPU package
+watts and hardware sensor clocks are not provided by it. Windows frequency,
+CPU, RAM, processes and WDDM GPU counters remain available. Remote sensor
+archives carry both native runtimes; their installer selects the host architecture.
 
 For a Linux desktop release embedding all supported collector payloads:
 
@@ -370,9 +395,9 @@ make release COLLECTOR_ARGS="--linux-dir artifacts --windows-dir artifacts --mac
 ```
 
 `make` remains a native development build; additional payloads already in
-`build` are embedded when present. `make windows-check` generates Windows
-COFF objects for the desktop and headless collector without executing Windows
-or requiring Windows link libraries. Full Windows runtime/device validation
+`build` are embedded when present. With the patched Odin toolchain,
+`make windows-check ODIN=<patched-odin>` generates Windows x64 and ARM64
+COFF objects for the desktop and headless collector without executing Windows. Full Windows runtime/device validation
 must be performed on Windows; a cross compile is not a hardware validation.
 
 To uninstall, disable Persistence from your ordinary user session first,
@@ -544,8 +569,15 @@ a normal host filesystem.
 
 RAM usage
 uses Linux `MemAvailable`, which includes reclaimable caches. Rates exclude
-loopback networking and disk partitions. GPU process VRAM comes directly from
-NVML, with duplicate compute/graphics entries counted once per GPU. Group RAM
+loopback networking and disk partitions. NVIDIA GPU process VRAM comes directly
+from NVML, with duplicate compute/graphics entries counted once per GPU. Other
+Linux GPU clients come from DRM fdinfo; duplicate descriptors for one client
+are counted once. Memory uses resident counters when exposed by the driver,
+with allocation counters as the fallback. Integrated GPUs report shared
+allocations instead of a dedicated VRAM bank. Sysfs supplies device utilization,
+memory and available temperature, power, fan and clock sensors; fdinfo engine
+time deltas supply activity where supported. Restricted process access can
+limit the clients observed. Group RAM
 is the sum of member RSS values, so shared pages can be counted more than once.
 
 ## Remote machines
@@ -554,33 +586,49 @@ task_master uses one persistent SSH connection per host, your SSH config aliases
 keys, agent and jump hosts. The header shows as many machine names as fit, with
 status dots and a small **+**.
 The selected machine stays visible; overflow hosts are in the dropdown. Its
-connection details include **Remove**, and dropdown rows have **x** to remove a
+connection details include **Delete**, and dropdown rows have **x** to remove a
 remote. Local is always the first machine and cannot be moved or removed.
 
-Click **+** (or press **Ctrl+N**) to open **SSH machines**. It lists hosts whose
-passwordless SSH login and command execution have succeeded, with telemetry
-status and **Install / fix** and **Terminal** actions beside each machine. Click
-a machine's name to view it. **Refresh** checks newly available hosts; the list
-scrolls when there are more hosts than fit. `--machines` opens this picker at launch.
+Click **+** (or press **Ctrl+N**) to open **Networked PCs**. Saved PCs appear
+immediately, including unreachable PCs and hosts whose SSH authentication needs
+attention. Each row shows connection state, last-sample age, and a precise
+connection or setup message, with **Retry now**, **Setup / fix**, **Terminal** and **Delete PC**
+actions. Click a machine's name to view it. **Refresh** discovers additional SSH
+hosts as suggestions with an **Add PC** button; the list scrolls when there are
+more hosts than fit. Click the background, **Done**, or **x**, or press **Esc** to
+close the dialog. `--machines` opens this panel at launch.
 
-Candidates come from concrete aliases in `~/.ssh/config` (including Include
-files), readable names in `known_hosts` and `known_hosts2`, and saved machine
-settings. Every new or restored host must pass a passwordless login check before
-it appears or starts telemetry. A config alias or a trusted host key alone does
-not qualify. Failed saved hosts retain their settings and can return on a later
-refresh. **Remove** dismisses a host across restarts; checking it explicitly in
-the picker restores it. An unlisted alias or `user@host` can be entered with
-**Check SSH**, which verifies access before adding it.
+**Add PC** saves an SSH alias or `user@host` immediately and starts its connection
+checks. Failed checks keep the machine visible. Ports and jump hosts remain in
+your SSH config. **Retry now** interrupts that PC's current connection or backoff;
+with Persistence enabled, a private per-machine request retries only that PC,
+without restarting other connections or the background service.
+
+Discovery candidates come from concrete aliases in `~/.ssh/config` (including
+Include files), readable names in `known_hosts` and `known_hosts2`, and saved
+machine settings. Newly discovered hosts must pass passwordless login and
+command execution before they appear as suggestions. Discovery never adds a
+top-bar tab, saves a machine, deploys a collector, or starts sampling. Click
+**Add PC** to begin monitoring. Hosts automatically saved by older versions are
+rechecked as suggestions. Saved and manually added PCs do not depend on discovery
+succeeding. **Delete PC** removes the monitored
+machine, stops its collection, and keeps discovery from suggesting it across
+restarts; explicitly adding it again restores it. Hashed known hosts cannot
+reveal destination names; enter an alias or address with **Add PC**.
 
 Up to eight background workers check hosts concurrently using your normal SSH
 configuration, keys, agent and jump hosts. Checks use batch mode, existing
 host-key trust, no password prompts and an eight-second deadline. Hashed known
-hosts cannot reveal destination names; use an SSH config alias or **Check SSH**.
+hosts cannot reveal destination names; use an SSH config alias or **Add PC**.
 Nonstandard ports belong in SSH config; discovered known-host ports and IPv6
-are retained. Each verified host collects independently of the selected tab.
+are retained. Each explicitly added host collects independently of the selected tab.
 
-**Install / fix** opens a local terminal, identifies the remote OS/architecture,
-transfers the matching bundled collector and installs hardware sensor access.
+**Setup / fix** opens a guided local terminal. Six stages check SSH connection
+and host trust, passwordless authentication, OS/architecture, collector transfer
+and protocol compatibility, durable installation and sensor permissions, then
+fresh telemetry after reconnecting. A new host key can be reviewed interactively
+in that terminal; changed keys are never bypassed. Automatic monitoring still
+requires a key or agent that works without an account-password prompt.
 On Linux it installs `setcap` if needed and grants the root-owned collector
 `CAP_PERFMON`. On macOS it installs the collector and Apple's `powermetrics`
 sensor LaunchDaemon. On Windows it installs the collector and the existing
@@ -588,13 +636,13 @@ sensor service/PawnIO installer; the SSH account must have an administrator
 token. Complete releases carry the Windows sensor archive as well as all six
 collectors. Development builds report missing payloads in the terminal.
 
-SSH remains passwordless during installation. Linux/macOS administrator
-passwords are entered into `sudo` in the terminal. Errors remain visible there;
-task_master reconnects after the terminal finishes, restarting persistent SSH
-workers even when the background executable is unchanged. Setup stays in a
-verification state until fresh telemetry arrives; a timeout shows the actual
-connection error instead of reporting installation success. Temporary installation files
-are cleaned up. The app itself stays unprivileged. **Terminal** opens an ordinary
+After the initial interactive trust/authentication check, installation requires
+passwordless SSH. Linux/macOS administrator passwords are entered into `sudo`
+in the terminal. Errors remain visible there and identify the failed setup
+stage. Successful installation reconnects only the target PC, including when
+Persistence owns its SSH worker. Setup stays in a verification state until fresh
+telemetry arrives; a timeout shows the actual connection error instead of
+reporting installation success. Temporary installation files are cleaned up. The app itself stays unprivileged. **Terminal** opens an ordinary
 interactive passwordless SSH shell for troubleshooting. GPU readings use the
 host's existing GPU driver; unavailable hardware sensors retain their status.
 
@@ -608,14 +656,23 @@ directory when the session ends. Linux samplers need a compatible libc
 (the current Linux build requires glibc 2.34 or newer); macOS samplers target
 macOS 13+, and Windows samplers target Windows 11+.
 
+Ordinary reconnections reuse the installed collector without administrator
+prompts. The collector announces installed or temporary mode before transfer,
+so an installed collector does not require uploading the bundled binary. The
+first snapshot verifies collector identity, version, capabilities and
+OS/architecture. Detected platform information is reused across reconnects;
+a mismatch invalidates it for the next attempt. Temporary mode is clearly
+shown, with Setup available to install a durable collector deliberately.
+
 Existing custom collector paths and display names in `machines.json` are
 preserved. A custom collector must match the host and protocol; the picker
 uses automatic installed/temporary sampling for new entries. SSH must already
-work without a password prompt. Unknown or changed host keys are rejected;
-review them with `ssh server` in your own terminal before checking the host.
+work without a password prompt. Unknown or changed host keys pause automatic
+retries with an actionable setup message. Review trust in the setup terminal or with `ssh server`, then retry.
 
-The collector needs no display, GLFW or Vulkan. It reads the same `/proc` and
-NVML data as Local and runs only for the SSH session, exiting when stdin closes.
+The collector needs no display, GLFW or Vulkan. It uses the same native GPU
+backends as Local, including Linux DRM/sysfs, Windows DXGI/WDDM and macOS
+Metal/IOKit, and runs only for the SSH session, exiting when stdin closes.
 NVIDIA data requires the host's NVML driver library; unavailable sensors retain
 the existing unavailable display. Package-power permissions are configured as
 part of installation on each machine:
@@ -649,9 +706,14 @@ SSH aliases start collecting at launch; newly verified hosts start as soon as
 discovery finds them, without needing to select their tabs.
 A paused remote freezes the displayed
 snapshot while its collector continues sampling. Other connected hosts remain
-live. A lost connection retains the last readings, marks them stale, and retries
-with backoff up to 30 seconds. SSH reads and decoding run on one background CPU
-worker per remote; all drawing stays on the local Vulkan GPU. With Persistence
+live. A lost network connection retains the last readings, marks them stale, and
+retries with backoff up to 30 seconds. Authentication, host trust, unsupported
+protocol and missing collector failures show **Setup required** and wait for a
+fix and explicit retry instead of repeating a failing operation. Session IDs,
+sequence numbers and source timing distinguish collector restarts, missing
+samples and buffered delivery, preserving graph gaps. SSH reads and decoding run
+on one background CPU worker per remote; all drawing stays on the local GPU
+(Metal on macOS, Vulkan elsewhere). With Persistence
 off, closing task_master or removing a machine closes its session and joins its
 worker. With Persistence on, the user service owns saved-machine connections
 and notices additions, removals and collector changes in the saved machine
@@ -661,19 +723,21 @@ The window shows its fresh local hardware reading immediately; cached history
 loads on the background reader. Local sampling continues during service startup
 until a current snapshot includes the GPUs detected by the desktop, preventing
 an older cache from replacing live GPU readings with an unavailable state.
-If the NVIDIA driver is unavailable at service startup, device discovery retries
-every five seconds. Service history resumes at handoff without inserting its
+If no graphics device is available at service startup, device discovery retries
+every five seconds. NVIDIA sensors also retry while the NVML driver is not ready,
+including on machines that already expose another GPU. Service history resumes
+at handoff without inserting its
 unavailable GPU samples between the desktop's live readings.
 Fresh history stays connected across the desktop/service handoff and a short
-service refresh at launch, including remote SSH sampler handoffs; longer outages,
-explicit pauses and dropped samples retain their gaps. Remote graphs start with
+service refresh at launch, including remote SSH sampler handoffs; sequence gaps,
+longer outages, explicit pauses and dropped samples retain their gaps. Remote graphs start with
 the first measured interval, avoiding the collector's startup CPU dip.
 
 On Linux, Persistence requires a running systemd user manager; Windows uses a
 user Task Scheduler task and macOS uses a user LaunchAgent. Its enablement is remembered
 and it starts with your user session; enabling it does not change logout or
 lingering policy. The service follows the selected polling interval without
-opening a window or initializing Vulkan. It retains every sample, while a
+opening a window or initializing the graphics renderer. It retains every sample, while a
 background publisher writes caches at most once per second so serialization
 and disk I/O do not block fast sampling. A separate lightweight live publisher
 and reader update graphs at the selected polling interval, independently of
@@ -705,7 +769,7 @@ connection, use `./build/task_master --remote=server`; this does not save the ho
 
 ## Lightweight design
 
-- Native telemetry APIs (`/proc`/NVML on Linux, Windows APIs, Mach/libproc/IOKit
+- Native telemetry APIs (`/proc`/DRM/sysfs/NVML on Linux, Windows APIs, Mach/libproc/IOKit
   on macOS), with no web runtime. The privileged macOS hardware sensor helper
   invokes Apple's `powermetrics`; process/system sampling stays in-process.
 - Bounded process buffers and CPU process counters grow with the workload and
@@ -717,14 +781,20 @@ connection, use `./build/task_master --remote=server`; this does not save the ho
   at 64 KiB and grows with incoming data, retaining the same 16 MiB limit.
   Thread scratch starts at 64 KiB, grows when required and releases additional
   blocks after each sample/frame. Process groups occupy 120 bytes.
-- One hinted FreeType font atlas, rasterized at the actual display density, and
-  one persistent Vulkan vertex buffer, allocated on demand from 256 KiB and
-  growing as needed for dense graph histories. CPU vertex storage also grows
-  with geometry; both release excess capacity after 120 smaller frames.
+- One font atlas rasterized at the actual display density: CoreText / CoreGraphics
+  on macOS and hinted FreeType on Linux/Windows. GPU vertex storage grows with
+  dense graph histories, using Metal buffers on macOS and a persistent Vulkan
+  buffer elsewhere. CPU vertex storage also grows with geometry; excess capacity
+  is released after 120 smaller frames.
   Font raster storage grows with the glyphs, and the texture uses its actual
   occupied height. Glyphs and panel edges align to
   physical pixels; a monitor density change rebuilds the atlas once.
-- One GPU draw per frame; GLFW sleeps between samples and wakes for input/resize.
+- One GPU draw per frame; AppKit on macOS and GLFW elsewhere sleep between
+  samples and wake for input/resize.
+- macOS saves a native Metal binary archive in the user cache under
+  `task_master/pipelines/ui-metal.metalar`. Shader, device, OS and pipeline
+  identity invalidate it; rejected archives fall back to normal Metal pipeline
+  compilation. The replaceable archive is private and bounded to 8 MiB.
 - Compatible Vulkan drivers save native pipeline binaries under
   `$XDG_CACHE_HOME/task_master/pipelines/` (normally
   `~/.cache/task_master/pipelines/`). Later launches restore the binaries without
@@ -758,7 +828,7 @@ connection, use `./build/task_master --remote=server`; this does not save the ho
   GPU process deduplication uses sorting and linear reductions,
   retaining maximum VRAM per PID within a GPU and summed VRAM across GPUs.
 - Startup prepares telemetry and rasterizes the font on two short-lived CPU
-  workers while the main thread initializes GLFW and Vulkan. Both workers finish
+  workers while the main thread initializes the native graphics backend. Both workers finish
   before the first draw; power access is dropped before either worker starts.
 
 On this machine (9800X3D / RTX 5090), the release binary is approximately 2.1 MiB.
@@ -808,14 +878,18 @@ a window or installing it. See [updater setup and release signing](docs/updater.
 `--stats` samples once without opening a window. `--smoke` opens the app for
 four seconds and exits. `--startup-profile` prints elapsed time for each startup
 stage; worker stages overlap the main thread and should not be summed.
-`--capture` saves an actual Vulkan-rendered PNG after
+`--capture` saves an actual GPU-rendered PNG after
 three seconds, then exits; compression can extend the total run time.
 
-Version 1.0.1 displays the first NVIDIA device in summary graphs, collects up
-to eight GPUs, 256 logical cores, 16,384 system PIDs and 2,048 GPU PIDs.
+Summary graphs display the first detected GPU; the GPU dashboard lets you
+select each device. Collection supports up to eight GPUs, 256 logical cores,
+16,384 system PIDs and 2,048 GPU PIDs.
 Process tables sort and scroll through all collected groups.
-Non-NVIDIA GPU telemetry is not implemented yet. A missing device or unsupported
-GPU sensor displays an unavailable state.
+GPU telemetry supports NVIDIA NVML, Linux DRM GPUs (including AMD, Intel and
+Qualcomm Adreno), Windows DXGI/WDDM adapters, and Apple Silicon/Intel/AMD Macs
+through Metal/IOKit. Sensor coverage depends on the hardware, driver and access
+permissions. A missing device or unsupported GPU sensor displays an unavailable
+state. Software rendering adapters are excluded from Windows device discovery.
 
 Files: `main.odin` (dashboard and input), `process_ui.odin` (grouped process tables),
 `process_preferences.odin` (saved pins, sorting and row menus),
@@ -824,7 +898,10 @@ Files: `main.odin` (dashboard and input), `process_ui.odin` (grouped process tab
 `memory_ui.odin` (RAM, swap and disk graphs),
 `overview_ui.odin` (Overview dashboard),
 `telemetry.odin` (live system data),
-`renderer.odin` (Vulkan/GLFW), `machines.odin` (host selector and saved state),
+`renderer.odin` (Linux/Windows Vulkan), `renderer_darwin.odin` (Metal),
+`renderer_font_darwin.odin` (CoreText/CoreGraphics),
+`desktop_window/` (AppKit on macOS, GLFW elsewhere),
+`machines.odin` (host selector and saved state),
 `remote_connection.odin` (SSH workers), `ssh_discovery.odin` (host candidates),
 `persistence.odin` (user service and graph cache),
 `persistence_toggle.odin` (background service changes),

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">task_master logo</title>
+  <defs>
+    <linearGradient id="utilization" gradientUnits="userSpaceOnUse" x1="0" y1="60" x2="0" y2="374">
+      <stop offset="0" stop-color="#F55C5C"/>
+      <stop offset="0.5" stop-color="#F5B863"/>
+      <stop offset="1" stop-color="#6ED4A3"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#utilization)" d="M152 60H232V124H290V190H232V266Q232 310 272 310H308V374H252Q152 374 152 274V190H110V124H152Z"/>
+  <path fill="#6ED4A3" d="M122 398H402V454H122Z"/>
+</svg>

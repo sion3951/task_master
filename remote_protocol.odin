@@ -3,13 +3,17 @@ package main
 import "core:encoding/json"
 import "core:math"
 
-REMOTE_PROTOCOL_VERSION :: 5
+REMOTE_PROTOCOL_VERSION :: 6
 REMOTE_MAX_FRAME_BYTES :: 16*1024*1024
 
 // A wire snapshot contains only display data. Local sampler counters, NVML
 // handles, file descriptors and pointers must never cross the connection.
 Remote_Snapshot :: struct {
     version: int,
+    collector_identity, collector_version, architecture, mode: string,
+    capabilities: []string,
+    session_id, sequence: u64,
+    source_seconds, sample_interval: f64,
     hostname, cpu_model: string,
     platform: string,
     cpu_percent: f32,
@@ -46,6 +50,11 @@ Remote_Snapshot :: struct {
 // their original Metrics. Only the validated display snapshot is copied.
 metrics_display_copy :: proc(m,source:^Metrics) {
     if m==source {return}
+    m.remote_session_id,m.remote_sequence=source.remote_session_id,source.remote_sequence
+    m.remote_source_seconds,m.remote_sample_interval=source.remote_source_seconds,source.remote_sample_interval
+    m.remote_collector_version,m.remote_collector_version_len=source.remote_collector_version,source.remote_collector_version_len
+    m.remote_architecture,m.remote_architecture_len=source.remote_architecture,source.remote_architecture_len
+    m.remote_mode,m.remote_mode_len=source.remote_mode,source.remote_mode_len
     metrics_buffer_ensure(&m._groups,source.total_process_groups)
     metrics_buffer_ensure(&m._gpu_groups,source.gpu_total_groups)
     metrics_buffer_ensure(&m.process_pids,source._group_pid_count)
@@ -91,6 +100,13 @@ remote_encode :: proc(m: ^Metrics) -> ([]u8, bool) {
     for group in m._gpu_groups[:m.gpu_total_groups] { gpu_pid_count += group.pid_count }
     s := Remote_Snapshot{
         version = REMOTE_PROTOCOL_VERSION,
+        collector_identity = "task_master-collector",
+        collector_version = string(m.remote_collector_version[:m.remote_collector_version_len]),
+        architecture = string(m.remote_architecture[:m.remote_architecture_len]),
+        mode = string(m.remote_mode[:m.remote_mode_len]),
+        capabilities = []string{"interval-control", "session-sequence", "source-timing"},
+        session_id = m.remote_session_id, sequence = m.remote_sequence,
+        source_seconds = m.remote_source_seconds, sample_interval = m.remote_sample_interval,
         hostname = m.hostname, cpu_model = m.cpu_model, platform = m.platform,
         cpu_percent = m.cpu_percent, cpu_count = m.cpu_count,
         cpu_online_count = m.cpu_online_count, cores = m.cores[:m.cpu_count],
@@ -169,7 +185,7 @@ remote_decode :: proc(data: []u8, m: ^Metrics, require_controls:bool=false) -> b
     s: Remote_Snapshot
     if json.unmarshal(data, &s, allocator = context.temp_allocator) != nil { return false }
     if require_controls&&s.version!=REMOTE_PROTOCOL_VERSION {return false}
-    if (s.version != REMOTE_PROTOCOL_VERSION && s.version != 4 && s.version != 3) || len(s.hostname) > len(m._hostname) || len(s.cpu_model) > len(m._cpu_model) ||
+    if (s.version != REMOTE_PROTOCOL_VERSION && s.version != 5 && s.version != 4 && s.version != 3) || len(s.hostname) > len(m._hostname) || len(s.cpu_model) > len(m._cpu_model) ||
         len(s.cpu_power_error) > len(m.cpu_power_error) || len(s.cpu_package_power)>len(m.cpu_package_power) ||
         s.cpu_count < 0 || s.cpu_count > len(m.cores) || len(s.cores) != s.cpu_count ||
         s.cpu_online_count < 0 || s.cpu_online_count > s.cpu_count || len(s.physical_cores) > len(m.physical_cores) ||
@@ -179,6 +195,18 @@ remote_decode :: proc(data: []u8, m: ^Metrics, require_controls:bool=false) -> b
         len(s.gpu_process_pids) > MAX_GPU_PIDS || len(s.gpus) > len(m.gpus) ||
         s.total_processes < len(s.process_pids) || s.gpu_total_processes < len(s.gpu_process_pids) { return false }
     if s.platform!=""&&s.platform!="linux"&&s.platform!="windows"&&s.platform!="darwin" {return false}
+    if len(s.collector_version)>len(m.remote_collector_version)||len(s.architecture)>len(m.remote_architecture)||len(s.mode)>len(m.remote_mode)||len(s.capabilities)>16 {return false}
+    if s.version==REMOTE_PROTOCOL_VERSION {
+        if !remote_nonnegative(s.source_seconds)||!remote_nonnegative(s.sample_interval)||s.source_seconds>1e9||s.sample_interval>1e9 {return false}
+        if require_controls {
+            if s.collector_identity!="task_master-collector"||s.session_id==0||s.sequence==0||s.collector_version==""||s.architecture==""||s.platform==""||s.mode!="installed"&&s.mode!="temporary"&&s.mode!="custom" {return false}
+            interval,sequence,timing:=false,false,false
+            for capability in s.capabilities {
+                switch capability {case "interval-control":interval=true;case "session-sequence":sequence=true;case "source-timing":timing=true}
+            }
+            if !interval||!sequence||!timing {return false}
+        }
+    }
     if s.version==3 {
         s.memory_free_available,s.memory_cached_available,s.memory_buffers_available=s.memory_breakdown_available,s.memory_breakdown_available,s.memory_breakdown_available
         for &group in s.processes {group.gpu_memory_available=true}
@@ -219,6 +247,11 @@ remote_decode :: proc(data: []u8, m: ^Metrics, require_controls:bool=false) -> b
 
     // Apply only after the whole snapshot has passed validation. Strings point
     // into Metrics storage so they outlive this frame's temporary JSON memory.
+    m.remote_session_id,m.remote_sequence=s.session_id,s.sequence
+    m.remote_source_seconds,m.remote_sample_interval=s.source_seconds,s.sample_interval
+    m.remote_collector_version_len=copy(m.remote_collector_version[:],s.collector_version)
+    m.remote_architecture_len=copy(m.remote_architecture[:],s.architecture)
+    m.remote_mode_len=copy(m.remote_mode[:],s.mode)
     metrics_buffer_ensure(&m._groups,len(s.groups))
     metrics_buffer_ensure(&m._gpu_groups,len(s.gpu_groups))
     metrics_buffer_ensure(&m.process_pids,len(s.process_pids))

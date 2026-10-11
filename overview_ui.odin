@@ -134,7 +134,7 @@ overview :: proc(a:^App) {
     m:=&a.metrics
     g:=&m.gpus[0]
     labels:=[3]string{"CPU utilization","GPU utilization","Physical memory"}
-    details:=[3]string{fmt.tprintf("%d threads / %s %.2f",m.cpu_count,"queue average" if m.platform=="windows" else "load",m.load[0]),string(g.name[:g.name_len]) if m.gpu_count>0 else "NVIDIA device unavailable",fmt.tprintf("%s used / %s",bytes_label(m.memory_used),bytes_label(m.memory_total))}
+    details:=[3]string{fmt.tprintf("%d threads / %s %.2f",m.cpu_count,"queue average" if m.platform=="windows" else "load",m.load[0]),string(g.name[:g.name_len]) if m.gpu_count>0 else "GPU device unavailable",fmt.tprintf("%s used / %s",bytes_label(m.memory_used),bytes_label(m.memory_total))}
     values:=[3]f32{m.cpu_percent,g.utilization,memory_pct(m.memory_used,m.memory_total)}
     available:=[3]bool{m.cpu_available&&a.history_count>0,m.gpu_count>0&&g.utilization_available,m.ram_available}
     for label,i in labels {

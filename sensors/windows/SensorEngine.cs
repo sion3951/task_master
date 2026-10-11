@@ -1,12 +1,13 @@
 using LibreHardwareMonitor.Hardware;
 using LibreHardwareMonitor.Hardware.Cpu;
+using LibreHardwareMonitor.Hardware.Gpu;
 using LibreHardwareMonitor.PawnIo;
 
 namespace task_master.Sensors;
 
 internal sealed class SensorEngine : IDisposable
 {
-    private readonly Computer computer = new() { IsCpuEnabled = true };
+    private readonly Computer computer = new() { IsCpuEnabled = true, IsGpuEnabled = true };
     private readonly int[] groupBases;
     private readonly uint logicalCount;
     private bool opened;
@@ -32,21 +33,21 @@ internal sealed class SensorEngine : IDisposable
             System.Runtime.InteropServices.Architecture.X64)
         {
             openError = "LibreHardwareMonitor/PawnIO CPU sensors require native Intel/AMD x64 hardware. Windows counters remain available.";
-            return;
+            computer.IsCpuEnabled = false;
         }
-        if (!PawnIo.IsInstalled || PawnIo.Version < new Version(2, 2))
+        if (computer.IsCpuEnabled && (!PawnIo.IsInstalled || PawnIo.Version < new Version(2, 2)))
         {
             openError = "Install the signed PawnIO 2.2+ sensor driver with scripts/install-sensors.ps1.";
-            return;
+            computer.IsCpuEnabled = false;
         }
         using var driver = Native.OpenSensorDriver();
-        if (driver.IsInvalid)
+        if (computer.IsCpuEnabled && driver.IsInvalid)
         {
             permissionDenied = System.Runtime.InteropServices.Marshal.GetLastWin32Error() == 5;
             openError = permissionDenied
                 ? "Sensor driver access denied. Repair the task_master_sensors service installation."
                 : "PawnIO driver is unavailable. Repair its installation or restart Windows.";
-            return;
+            computer.IsCpuEnabled = false;
         }
         computer.Open();
         opened = true;
@@ -112,10 +113,62 @@ internal sealed class SensorEngine : IDisposable
             }
         }
         var errors = new List<string>();
-        if (!completePower) errors.Add("CPU package power is not exposed by this hardware/driver.");
+        if (openError.Length > 0) errors.Add(openError);
+        else if (!completePower) errors.Add("CPU package power is not exposed by this hardware/driver.");
         if (frequencies.Take((int)logicalCount).Any(clock => clock <= 0))
             errors.Add("Measured clocks are unavailable for some logical CPUs.");
-        return new(logicalCount, completePower ? watts : 0, completePower, false, frequencies, string.Join(" ", errors));
+        return new(logicalCount, completePower ? watts : 0, completePower, permissionDenied, frequencies,
+            string.Join(" ", errors), SampleGpus());
+    }
+
+    private GpuSensor[] SampleGpus()
+    {
+        var result = new List<GpuSensor>();
+        foreach (var gpu in computer.Hardware.OfType<GenericGpu>().Take(SensorPacket.MaxGpus))
+        {
+            // One failing vendor API must not discard the CPU snapshot or the
+            // other cards. The desktop's Windows counters remain independent.
+            try
+            {
+                gpu.Update();
+                uint vendor = gpu.HardwareType switch
+                {
+                    HardwareType.GpuAmd => 0x1002u,
+                    HardwareType.GpuIntel => 0x8086u,
+                    HardwareType.GpuNvidia => 0x10deu,
+                    _ => 0u
+                };
+                float Read(SensorType type, params string[] names)
+                {
+                    foreach (string name in names)
+                    {
+                        var sensor = gpu.Sensors.FirstOrDefault(s => s.SensorType == type && s.Name == name);
+                        if (sensor?.Value is float value && float.IsFinite(value) && value >= 0) return value;
+                    }
+                    return float.NaN;
+                }
+                float temperature = Read(SensorType.Temperature, "GPU Core");
+                float power = Read(SensorType.Power, "GPU Package", "GPU Power", "GPU PPT");
+                float fan = Read(SensorType.Control, "GPU Fan");
+                float clock = Read(SensorType.Clock, "GPU Core");
+                uint flags = (float.IsFinite(temperature) && temperature <= 200 ? 1u : 0u) |
+                    (float.IsFinite(power) ? 2u : 0u) |
+                    (float.IsFinite(fan) && fan <= 100 ? 4u : 0u) |
+                    (float.IsFinite(clock) && clock > 0 ? 8u : 0u);
+                // AMD exposes PCI bus/device as public properties on its
+                // internal class. No vendor enum order is used as identity.
+                int PciProperty(string name) => gpu.GetType().GetProperty(name)?.GetValue(gpu) switch
+                {
+                    int value => value,
+                    uint value when value <= int.MaxValue => (int)value,
+                    _ => -1
+                };
+                result.Add(new(gpu.Name, vendor, PciProperty("BusNumber"), PciProperty("DeviceNumber"),
+                    flags, temperature, power, fan, clock));
+            }
+            catch { }
+        }
+        return result.ToArray();
     }
 
     private void CopyClock(ISensor? sensor, CpuId[] threads, float[] result)

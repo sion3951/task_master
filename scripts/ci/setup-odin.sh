@@ -1,5 +1,5 @@
 #!/bin/sh
-# CI compiler: the same immutable release on every collector/package runner.
+# CI compilers: immutable, checksum-verified releases per build platform.
 set -eu
 release=dev-2026-10
 case "$(uname -s):$(uname -m)" in
@@ -10,9 +10,16 @@ case "$(uname -s):$(uname -m)" in
         platform=linux-arm64
         checksum=99c43e9670a285901d6cfee5f56197b74c7d6f7c537b35ecba0c1b44ac2e4df8 ;;
     Darwin:arm64)
+        # September avoids October's Objective-C code-generation regression:
+        # https://github.com/odin-lang/Odin/issues/7793
+        release=dev-2026-09
         platform=macos-arm64
-        checksum=b276c6ac87c3eea17446a6ca9080089b6e9f492057fb773591775ee49d92a1cf ;;
-    *) printf '%s\n' 'This CI compiler release supports Linux x64/ARM64 and macOS ARM64.' >&2; exit 1 ;;
+        checksum=3e6cbc1f247d8d14fe02c3151272d0a5b8d6d77acb7219f5b62914e4d95d97f7 ;;
+    Darwin:x86_64)
+        release=dev-2026-09
+        platform=macos-amd64
+        checksum=c1f6d6320218ec7e511093a87bdd599b72a8417a9d2a00de2c9691103562165b ;;
+    *) printf '%s\n' 'This CI compiler setup supports Linux and macOS x64/ARM64.' >&2; exit 1 ;;
 esac
 destination=build/toolchains/odin
 mkdir -p "$destination"

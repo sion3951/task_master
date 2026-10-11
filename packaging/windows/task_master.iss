@@ -6,6 +6,18 @@
   #error PackageVersion is required
 #endif
 
+#ifndef PackageArchitecture
+  #define PackageArchitecture "x64"
+#endif
+#if PackageArchitecture == "arm64"
+  #define AllowedArchitecture "arm64"
+#else
+  #if PackageArchitecture != "x64"
+    #error PackageArchitecture must be x64 or arm64
+  #endif
+  #define AllowedArchitecture "x64compatible"
+#endif
+
 [Setup]
 AppId=dev.task_master.desktop
 AppName=task_master
@@ -16,10 +28,10 @@ DisableDirPage=yes
 DisableProgramGroupPage=yes
 UsePreviousAppDir=no
 PrivilegesRequired=admin
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#AllowedArchitecture}
+ArchitecturesInstallIn64BitMode={#AllowedArchitecture}
 MinVersion=10.0.22000
-OutputBaseFilename=task_master-{#PackageVersion}-windows-x64-setup
+OutputBaseFilename=task_master-{#PackageVersion}-windows-{#PackageArchitecture}-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -1,0 +1,430 @@
+diff --git a/base/runtime/procs_windows_arm64.odin b/base/runtime/procs_windows_arm64.odin
+new file mode 100644
+index 0000000..317f93f
+--- /dev/null
++++ b/base/runtime/procs_windows_arm64.odin
+@@ -0,0 +1,27 @@
++#+private
++#+no-instrumentation
++package runtime
++
++foreign import kernel32 "system:Kernel32.lib"
++
++@(private)
++foreign kernel32 {
++	RaiseException :: proc "system" (dwExceptionCode, dwExceptionFlags, nNumberOfArguments: u32, lpArguments: ^uint) -> ! ---
++}
++
++windows_trap_array_bounds :: proc "contextless" () -> ! {
++	EXCEPTION_ARRAY_BOUNDS_EXCEEDED :: 0xC000008C
++	when ODIN_CODEPAGE_MAGIC {
++		SetConsoleOutputCP(old_console_codepage)
++	}
++	RaiseException(EXCEPTION_ARRAY_BOUNDS_EXCEEDED, 0, 0, nil)
++}
++
++windows_trap_type_assertion :: proc "contextless" () -> ! {
++	windows_trap_array_bounds()
++}
++
++// Native ARM64 stack probing is provided by the MSVC runtime.
++when ODIN_NO_CRT {
++	#panic("Windows ARM64 currently requires the MSVC runtime; omit -no-crt.")
++}
+diff --git a/core/sys/info/cpu_windows_arm64.odin b/core/sys/info/cpu_windows_arm64.odin
+new file mode 100644
+index 0000000..4f3dcf8
+--- /dev/null
++++ b/core/sys/info/cpu_windows_arm64.odin
+@@ -0,0 +1,18 @@
++package sysinfo
++
++foreign import kernel32 "system:kernel32.lib"
++
++foreign kernel32 {
++    IsProcessorFeaturePresent :: proc "system" (feature: u32) -> b32 ---
++}
++
++@(private)
++_cpu_features :: proc "contextless" () -> CPU_Features {
++    features: CPU_Features = {.asimd, .floatingpoint}
++    // Windows exposes supported instruction sets without reading privileged
++    // ARM identification registers. ARMv8 NEON/FP are mandatory on Windows.
++    if IsProcessorFeaturePresent(30) {features += {.aes, .pmull, .sha1, .sha256}}
++    if IsProcessorFeaturePresent(31) {features += {.crc32}}
++    if IsProcessorFeaturePresent(34) {features += {.lse}}
++    return features
++}
+diff --git a/core/sys/windows/user32.odin b/core/sys/windows/user32.odin
+index 5006c06..e452509 100644
+--- a/core/sys/windows/user32.odin
++++ b/core/sys/windows/user32.odin
+@@ -384,7 +384,7 @@ CreateWindowW :: #force_inline proc "system" (
+ 	)
+ }
+ 
+-when ODIN_ARCH == .amd64 {
++when ODIN_ARCH == .amd64 || ODIN_ARCH == .arm64 {
+ 	@(default_calling_convention="system")
+ 	foreign user32 {
+ 		GetClassLongPtrW :: proc(hWnd: HWND, nIndex: INT) -> ULONG_PTR ---
+diff --git a/src/build_settings.cpp b/src/build_settings.cpp
+index 022f1cd..6f9e6c0 100644
+--- a/src/build_settings.cpp
++++ b/src/build_settings.cpp
+@@ -725,6 +725,13 @@ gb_global TargetMetrics target_windows_amd64 = {
+ 	str_lit("x86_64-pc-windows-msvc"),
+ };
+ 
++gb_global TargetMetrics target_windows_arm64 = {
++	TargetOs_windows,
++	TargetArch_arm64,
++	8, 8, 16, 16,
++	str_lit("aarch64-pc-windows-msvc"),
++};
++
+ gb_global TargetMetrics target_linux_i386 = {
+ 	TargetOs_linux,
+ 	TargetArch_i386,
+@@ -929,6 +936,7 @@ gb_global NamedTargetMetrics named_targets[] = {
+ 
+ 	{ str_lit("windows_i386"),        &target_windows_i386   },
+ 	{ str_lit("windows_amd64"),       &target_windows_amd64  },
++	{ str_lit("windows_arm64"),       &target_windows_arm64  },
+ 
+ 	{ str_lit("freebsd_i386"),        &target_freebsd_i386   },
+ 	{ str_lit("freebsd_amd64"),       &target_freebsd_amd64  },
+@@ -2007,6 +2015,10 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
+ 		case TargetArch_amd64:
+ 			bc->link_flags = str_lit("/machine:x64 ");
+ 			break;
++		case TargetArch_arm64:
++			bc->link_flags = str_lit("/machine:arm64 ");
++			if (bc->linker_choice == Linker_Default) bc->linker_choice = Linker_msvc;
++			break;
+ 		case TargetArch_i386:
+ 			bc->link_flags = str_lit("/machine:x86 ");
+ 			break;
+diff --git a/src/linker.cpp b/src/linker.cpp
+index 4396121..3678d4f 100644
+--- a/src/linker.cpp
++++ b/src/linker.cpp
+@@ -300,6 +300,9 @@ try_cross_linking:;
+ 			defer (string_set_destroy(&asm_files));
+ 
+ 		#if !defined(GB_SYSTEM_WINDOWS)
++			StringSet sdk_directories = {};
++			string_set_init(&sdk_directories);
++			defer (string_set_destroy(&sdk_directories));
+ 			StringMap<String> libs_normalized = {};
+ 			string_map_init(&libs_normalized);
+ 			defer (string_map_destroy(&libs_normalized));
+@@ -308,6 +311,8 @@ try_cross_linking:;
+ 			for_array(i, walker_list) {
+ 				FileInfo entry = walker_list[i];
+ 				if (entry.is_dir) {
++					// SDK version symlinks can point back to their parent.
++					if (string_set_update(&sdk_directories, entry.fullpath)) continue;
+ 					Array<FileInfo> walker_children = {};
+ 					ReadDirectoryError child_rd_err = read_directory(entry.fullpath, &walker_children);
+ 					for_array(j, walker_children) {
+diff --git a/src/llvm_abi.cpp b/src/llvm_abi.cpp
+index fd60d54..5de129d 100644
+--- a/src/llvm_abi.cpp
++++ b/src/llvm_abi.cpp
+@@ -1842,6 +1842,7 @@ namespace lbAbiArm64 {
+ 
+ 		GB_ASSERT(original_type->kind == Type_Proc);
+ 		auto const &params = original_type->Proc.params->Tuple.variables;
++		bool win_varargs = build_context.metrics.os == TargetOs_windows && original_type->Proc.c_vararg;
+ 
+ 		for (unsigned i = 0, j = 0; i < arg_count; i++, j++) {
+ 			while (params[j]->kind != Entity_Variable) {
+@@ -1861,10 +1862,10 @@ namespace lbAbiArm64 {
+ 
+ 			if (is_register(type)) {
+ 				args[i] = non_struct(c, type, ptype);
+-			} else if (is_homogenous_aggregate(c, type, &homo_base_type, &homo_member_count) &&
++			} else if (!win_varargs && is_homogenous_aggregate(c, type, &homo_base_type, &homo_member_count) &&
+ 			           is_homogenous_aggregate_small_enough(homo_base_type, homo_member_count)) {
+ 				args[i] = lb_arg_type_direct(type, llvm_array_type(homo_base_type, homo_member_count), nullptr, nullptr);
+-			} else if (is_homogenous_aggregate_source(c, ptype, &src_base_type, &src_member_count) &&
++			} else if (!win_varargs && is_homogenous_aggregate_source(c, ptype, &src_base_type, &src_member_count) &&
+ 			           is_homogenous_aggregate_small_enough(src_base_type, src_member_count)) {
+ 				args[i] = lb_arg_type_direct(type, llvm_array_type(src_base_type, src_member_count), nullptr, nullptr);
+ 			} else {
+diff --git a/src/main.cpp b/src/main.cpp
+index 5b45b6a..aef0694 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -537,8 +537,8 @@ enum BuildFlagKind {
+ 	BuildFlag_IgnoreVsSearch,
+ 	BuildFlag_ResourceFile,
+ 	BuildFlag_WindowsPdbName,
+-	BuildFlag_Subsystem,
+ #endif
++	BuildFlag_Subsystem,
+ 
+ 	BuildFlag_AndroidKeystore,
+ 	BuildFlag_AndroidKeystoreAlias,
+@@ -808,8 +808,8 @@ gb_internal bool parse_build_flags(Array<String> args) {
+ 	add_flag(&build_flags, BuildFlag_IgnoreVsSearch,          str_lit("ignore-vs-search"),          BuildFlagParam_None,    Command__does_build);
+ 	add_flag(&build_flags, BuildFlag_ResourceFile,            str_lit("resource"),                  BuildFlagParam_String,  Command__does_build);
+ 	add_flag(&build_flags, BuildFlag_WindowsPdbName,          str_lit("pdb-name"),                  BuildFlagParam_String,  Command__does_build);
+-	add_flag(&build_flags, BuildFlag_Subsystem,               str_lit("subsystem"),                 BuildFlagParam_String,  Command__does_build);
+ #endif
++	add_flag(&build_flags, BuildFlag_Subsystem,               str_lit("subsystem"),                 BuildFlagParam_String,  Command__does_build);
+ 
+ 	add_flag(&build_flags, BuildFlag_AndroidKeystore,         str_lit("android-keystore"),          BuildFlagParam_String,  Command_bundle_android);
+ 	add_flag(&build_flags, BuildFlag_AndroidKeystoreAlias,    str_lit("android-keystore-alias"),    BuildFlagParam_String,  Command_bundle_android);
+@@ -1969,6 +1969,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
+ 							break;
+ 						}
+ 
++					#endif
+ 						case BuildFlag_Subsystem: {
+ 							// TODO(Jeroen): Parse optional "[,major[.minor]]"
+ 
+@@ -2011,7 +2012,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
+ 							}
+ 							break;
+ 						}
+-					#endif
++
+ 
+ 						case BuildFlag_AndroidKeystore:
+ 							GB_ASSERT(value.kind == ExactValue_String);
+diff --git a/src/microsoft_craziness.h b/src/microsoft_craziness.h
+index 56af725..e5f50c1 100644
+--- a/src/microsoft_craziness.h
++++ b/src/microsoft_craziness.h
+@@ -332,9 +332,9 @@ gb_internal void find_windows_kit_paths(Find_Result *result) {
+ 		defer (mc_free(data_bin.best_name));
+ 
+ 		if (data_lib.best_name.len && data_bin.best_name.len) {
+-			if (build_context.metrics.arch == TargetArch_amd64) {
+-				result->windows_sdk_um_library_path   = mc_concat(data_lib.best_name, str_lit("\\um\\x64\\"));
+-				result->windows_sdk_ucrt_library_path = mc_concat(data_lib.best_name, str_lit("\\ucrt\\x64\\"));
++			if (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64) {
++				result->windows_sdk_um_library_path   = mc_concat(data_lib.best_name, (build_context.metrics.arch == TargetArch_arm64 ? str_lit("\\um\\arm64\\") : str_lit("\\um\\x64\\")));
++				result->windows_sdk_ucrt_library_path = mc_concat(data_lib.best_name, (build_context.metrics.arch == TargetArch_arm64 ? str_lit("\\ucrt\\arm64\\") : str_lit("\\ucrt\\x64\\")));
+ 				result->windows_sdk_bin_path          = mc_concat(data_bin.best_name, str_lit("\\x64\\"));
+ 				sdk_found = true;
+ 			} else if (build_context.metrics.arch == TargetArch_i386) {
+@@ -416,8 +416,8 @@ gb_internal bool find_visual_studio_by_fighting_through_microsoft_craziness(Find
+ 			defer (mc_free(base_path));
+ 
+ 			String library_path = {};
+-			if (build_context.metrics.arch == TargetArch_amd64) {
+-				library_path = mc_concat(base_path, str_lit("\\lib\\x64\\"));
++			if (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64) {
++				library_path = mc_concat(base_path, (build_context.metrics.arch == TargetArch_arm64 ? str_lit("\\lib\\arm64\\") : str_lit("\\lib\\x64\\")));
+ 			} else if (build_context.metrics.arch == TargetArch_i386) {
+ 				library_path = mc_concat(base_path, str_lit("\\lib\\x86\\"));
+ 			} else {
+@@ -427,8 +427,8 @@ gb_internal bool find_visual_studio_by_fighting_through_microsoft_craziness(Find
+ 			String library_file = mc_concat(library_path, str_lit("vcruntime.lib"));
+ 
+ 			if (gb_file_exists((const char*)library_file.text)) {
+-				if (build_context.metrics.arch == TargetArch_amd64) {
+-					result->vs_exe_path = mc_concat(base_path, str_lit("\\bin\\Hostx64\\x64\\"));
++				if (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64) {
++					result->vs_exe_path = mc_concat(base_path, (build_context.metrics.arch == TargetArch_arm64 ? str_lit("\\bin\\Hostx64\\arm64\\") : str_lit("\\bin\\Hostx64\\x64\\")));
+ 				} else if (build_context.metrics.arch == TargetArch_i386) {
+ 					result->vs_exe_path = mc_concat(base_path, str_lit("\\bin\\Hostx86\\x86\\"));
+ 				} else {
+@@ -481,9 +481,10 @@ gb_internal bool find_visual_studio_by_fighting_through_microsoft_craziness(Find
+ 			}
+ 			String base_path = make_string_c(c_str);
+ 
++			if (build_context.metrics.arch == TargetArch_arm64) continue;
+ 			String lib_path = {};
+ 
+-			if (build_context.metrics.arch == TargetArch_amd64) {
++			if (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64) {
+ 				lib_path = mc_concat(base_path, str_lit("VC\\Lib\\amd64\\"));
+ 			} else if (build_context.metrics.arch == TargetArch_i386) {
+ 				lib_path = mc_concat(base_path, str_lit("VC\\Lib\\"));
+@@ -496,7 +497,7 @@ gb_internal bool find_visual_studio_by_fighting_through_microsoft_craziness(Find
+ 			defer (mc_free(vcruntime_filename));
+ 
+ 			if (gb_file_exists((const char*)vcruntime_filename.text)) {
+-				if (build_context.metrics.arch == TargetArch_amd64) {
++				if (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64) {
+ 					result->vs_exe_path = mc_concat(base_path, str_lit("VC\\bin\\"));
+ 				} else if (build_context.metrics.arch == TargetArch_i386) {
+ 					result->vs_exe_path = mc_concat(base_path, str_lit("VC\\bin\\x86_amd64\\"));
+@@ -516,7 +517,7 @@ gb_internal bool find_visual_studio_by_fighting_through_microsoft_craziness(Find
+ // NOTE(WalterPlinge): Environment variables can help to find Visual C++ and WinSDK paths for both
+ // official and portable installations (like mmozeiko's portable msvc script).
+ gb_internal void find_windows_kit_paths_from_env_vars(Find_Result *result) {
+-	if (build_context.metrics.arch != TargetArch_amd64 && build_context.metrics.arch != TargetArch_i386) {
++	if (build_context.metrics.arch != TargetArch_amd64 && build_context.metrics.arch != TargetArch_arm64 && build_context.metrics.arch != TargetArch_i386) {
+ 		return;
+ 	}
+ 
+@@ -571,7 +572,7 @@ gb_internal void find_windows_kit_paths_from_env_vars(Find_Result *result) {
+ 			bin = mc_concat(dir_bin, ver);
+ 		}
+ 
+-		if (build_context.metrics.arch == TargetArch_amd64) {
++		if (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64) {
+ 			result->windows_sdk_bin_path = mc_concat(bin, str_lit("x64\\"));
+ 			sdk_bin_found = true;
+ 		} else if (build_context.metrics.arch == TargetArch_i386) {
+@@ -591,9 +592,9 @@ gb_internal void find_windows_kit_paths_from_env_vars(Find_Result *result) {
+ 		defer (mc_free(dir));
+ 		defer (mc_free(ver));
+ 
+-		if (build_context.metrics.arch == TargetArch_amd64) {
+-			result->windows_sdk_um_library_path   = mc_concat(dir, str_lit("Lib\\"), ver, str_lit("um\\x64\\"));
+-			result->windows_sdk_ucrt_library_path = mc_concat(dir, str_lit("Lib\\"), ver, str_lit("ucrt\\x64\\"));
++		if (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64) {
++			result->windows_sdk_um_library_path   = mc_concat(dir, str_lit("Lib\\"), ver, (build_context.metrics.arch == TargetArch_arm64 ? str_lit("um\\arm64\\") : str_lit("um\\x64\\")));
++			result->windows_sdk_ucrt_library_path = mc_concat(dir, str_lit("Lib\\"), ver, (build_context.metrics.arch == TargetArch_arm64 ? str_lit("ucrt\\arm64\\") : str_lit("ucrt\\x64\\")));
+ 			sdk_lib_found = true;
+ 		} else if (build_context.metrics.arch == TargetArch_i386) {
+ 			result->windows_sdk_um_library_path   = mc_concat(dir, str_lit("Lib\\"), ver, str_lit("um\\x86\\"));
+@@ -612,11 +613,11 @@ gb_internal void find_windows_kit_paths_from_env_vars(Find_Result *result) {
+ 			// NOTE(WalterPlinge): I don't know if there's a chance for the LIB variable
+ 			// to be set without a trailing '\' (apart from manually), so we can just
+ 			// check paths without it (see use of `String end` in the loop below)
+-			String um_dir = build_context.metrics.arch == TargetArch_amd64
+-				? str_lit("um\\x64")
++			String um_dir = (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64)
++				? (build_context.metrics.arch == TargetArch_arm64 ? str_lit("um\\arm64") : str_lit("um\\x64"))
+ 				: str_lit("um\\x86");
+-			String ucrt_dir = build_context.metrics.arch == TargetArch_amd64
+-				? str_lit("ucrt\\x64")
++			String ucrt_dir = (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64)
++				? (build_context.metrics.arch == TargetArch_arm64 ? str_lit("ucrt\\arm64") : str_lit("ucrt\\x64"))
+ 				: str_lit("ucrt\\x86");
+ 
+ 			isize lo = {0};
+@@ -666,7 +667,7 @@ gb_internal void find_windows_kit_paths_from_env_vars(Find_Result *result) {
+ // official and portable installations (like mmozeiko's portable msvc script). This will only use
+ // the first paths it finds, and won't overwrite any values that `result` already has.
+ gb_internal void find_visual_studio_paths_from_env_vars(Find_Result *result) {
+-	if (build_context.metrics.arch != TargetArch_amd64 && build_context.metrics.arch != TargetArch_i386) {
++	if (build_context.metrics.arch != TargetArch_amd64 && build_context.metrics.arch != TargetArch_arm64 && build_context.metrics.arch != TargetArch_i386) {
+ 		return;
+ 	}
+ 
+@@ -677,11 +678,11 @@ gb_internal void find_visual_studio_paths_from_env_vars(Find_Result *result) {
+ 	defer (mc_free(vctid));
+ 
+ 	if (vctid.len) {
+-		String exe = build_context.metrics.arch == TargetArch_amd64
+-			? str_lit("bin\\Hostx64\\x64\\")
++		String exe = (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64)
++			? (build_context.metrics.arch == TargetArch_arm64 ? str_lit("bin\\Hostx64\\arm64\\") : str_lit("bin\\Hostx64\\x64\\"))
+ 			: str_lit("bin\\Hostx86\\x86\\");
+-		String lib = build_context.metrics.arch == TargetArch_amd64
+-			? str_lit("lib\\x64\\")
++		String lib = (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64)
++			? (build_context.metrics.arch == TargetArch_arm64 ? str_lit("lib\\arm64\\") : str_lit("lib\\x64\\"))
+ 			: str_lit("lib\\x86\\");
+ 
+ 		if (string_ends_with(vctid, str_lit("\\"))) {
+@@ -701,15 +702,15 @@ gb_internal void find_visual_studio_paths_from_env_vars(Find_Result *result) {
+ 		defer (mc_free(path));
+ 
+ 		if (path.len) {
+-			String exe = build_context.metrics.arch == TargetArch_amd64
+-				? str_lit("bin\\Hostx64\\x64")
++			String exe = (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64)
++				? (build_context.metrics.arch == TargetArch_arm64 ? str_lit("bin\\Hostx64\\arm64") : str_lit("bin\\Hostx64\\x64"))
+ 				: str_lit("bin\\Hostx86\\x86");
+ 			// The environment variable may have an uppercase X even though the folder is lowercase
+-			String exe2 = build_context.metrics.arch == TargetArch_amd64
+-				? str_lit("bin\\HostX64\\x64")
++			String exe2 = (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64)
++				? (build_context.metrics.arch == TargetArch_arm64 ? str_lit("bin\\HostX64\\arm64") : str_lit("bin\\HostX64\\x64"))
+ 				: str_lit("bin\\HostX86\\x86");
+-			String lib = build_context.metrics.arch == TargetArch_amd64
+-				? str_lit("lib\\x64")
++			String lib = (build_context.metrics.arch == TargetArch_amd64 || build_context.metrics.arch == TargetArch_arm64)
++				? (build_context.metrics.arch == TargetArch_arm64 ? str_lit("lib\\arm64") : str_lit("lib\\x64"))
+ 				: str_lit("lib\\x86");
+ 
+ 			isize lo = {0};
+diff --git a/src/parser.cpp b/src/parser.cpp
+index f1f42e1..ab84718 100644
+--- a/src/parser.cpp
++++ b/src/parser.cpp
+@@ -4727,7 +4727,7 @@ gb_internal ProcCallingConvention string_to_calling_convention(String const &s)
+ 	if (s == "preserve/all")  return ProcCC_PreserveAll;
+ 
+ 	if (s == "system") {
+-		if (build_context.metrics.os == TargetOs_windows) {
++		if (build_context.metrics.os == TargetOs_windows && build_context.metrics.arch != TargetArch_arm64) {
+ 			return ProcCC_StdCall;
+ 		}
+ 		return ProcCC_CDecl;
+diff --git a/src/path.cpp b/src/path.cpp
+index fe6336a..355865f 100644
+--- a/src/path.cpp
++++ b/src/path.cpp
+@@ -429,6 +429,7 @@ gb_internal ReadDirectoryError read_directory(String path, Array<FileInfo> *fi)
+ 		GB_PANIC("unreachable");
+ 	}
+ 
++	defer (closedir(dir));
+ 	array_init(fi, a, 0, 100);
+ 
+ 	for (;;) {
+diff --git a/vendor/glfw/bindings/bindings.odin b/vendor/glfw/bindings/bindings.odin
+index 3f2f082..7e84dfe 100644
+--- a/vendor/glfw/bindings/bindings.odin
++++ b/vendor/glfw/bindings/bindings.odin
+@@ -15,7 +15,7 @@ when ODIN_OS == .Windows {
+ 		}
+ 	} else {
+ 		foreign import glfw {
+-			"../lib/glfw3_mt.lib",
++			#config(GLFW_LIBRARY, "../lib/glfw3_mt.lib"),
+ 			"system:user32.lib",
+ 			"system:gdi32.lib",
+ 			"system:shell32.lib",
+diff --git a/vendor/stb/image/stb_image.odin b/vendor/stb/image/stb_image.odin
+index 85614dd..3c178c7 100644
+--- a/vendor/stb/image/stb_image.odin
++++ b/vendor/stb/image/stb_image.odin
+@@ -5,7 +5,8 @@ import "core:c"
+ 
+ @(private)
+ LIB :: (
+-	     "../lib/stb_image.lib"      when ODIN_OS == .Windows
++	     "../lib/arm64/stb_image.lib" when ODIN_OS == .Windows && ODIN_ARCH == .arm64
++	else "../lib/stb_image.lib"      when ODIN_OS == .Windows
+ 	else "../lib/stb_image.a"        when ODIN_OS == .Linux
+ 	else "../lib/darwin/stb_image.a" when ODIN_OS == .Darwin
+ 	else "../lib/stb_image_wasm.o"   when ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32
+diff --git a/vendor/stb/image/stb_image_resize.odin b/vendor/stb/image/stb_image_resize.odin
+index 579f216..de87707 100644
+--- a/vendor/stb/image/stb_image_resize.odin
++++ b/vendor/stb/image/stb_image_resize.odin
+@@ -4,7 +4,8 @@ import "core:c"
+ 
+ @(private)
+ RESIZE_LIB :: (
+-	     "../lib/stb_image_resize.lib"      when ODIN_OS == .Windows
++	     "../lib/arm64/stb_image_resize.lib" when ODIN_OS == .Windows && ODIN_ARCH == .arm64
++	else "../lib/stb_image_resize.lib"      when ODIN_OS == .Windows
+ 	else "../lib/stb_image_resize.a"        when ODIN_OS == .Linux
+ 	else "../lib/darwin/stb_image_resize.a" when ODIN_OS == .Darwin
+ 	else "../lib/stb_image_resize_wasm.o"   when ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32
+diff --git a/vendor/stb/image/stb_image_write.odin b/vendor/stb/image/stb_image_write.odin
+index af4bd3e..b6dff64 100644
+--- a/vendor/stb/image/stb_image_write.odin
++++ b/vendor/stb/image/stb_image_write.odin
+@@ -4,7 +4,8 @@ import "core:c"
+ 
+ @(private)
+ WRITE_LIB :: (
+-	     "../lib/stb_image_write.lib"      when ODIN_OS == .Windows
++	     "../lib/arm64/stb_image_write.lib" when ODIN_OS == .Windows && ODIN_ARCH == .arm64
++	else "../lib/stb_image_write.lib"      when ODIN_OS == .Windows
+ 	else "../lib/stb_image_write.a"        when ODIN_OS == .Linux
+ 	else "../lib/darwin/stb_image_write.a" when ODIN_OS == .Darwin
+ 	else "../lib/stb_image_write_wasm.o"   when ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32

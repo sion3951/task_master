@@ -12,8 +12,8 @@ Default: build this Linux or macOS machine's native collector, keeping other pay
 Prebuilt directories accept task_master-collector-linux-{amd64,arm64} and
  task_master-collector-darwin-{amd64,arm64} and
  task_master-collector-windows-{amd64,arm64}[.exe]. Windows directories can also
- provide task_master-collector.exe. Windows ARM64 uses x64 emulation on Win11
- when only the Windows x64 collector is provided.
+ provide task_master-collector.exe for x64. ARM64 payloads must be native;
+ use the patched Windows ARM64 Odin compiler for cross-builds.
 
 Environment:
  ODIN                       Odin compiler executable (default: odin)
@@ -82,6 +82,7 @@ trap 'exit 143' TERM
 mkdir "$stage/source"
 cp telemetry*.odin remote_protocol.odin collector/*.odin "$stage/source/"
 odin=${ODIN:-odin}
+version=${PACKAGE_VERSION:-$(cat VERSION)}
 
 verify_linux() {
     description=$(file -b "$1")
@@ -92,11 +93,10 @@ verify_linux() {
 }
 verify_windows() {
     description=$(file -b "$1")
-    case "$description" in
-        *PE32+*executable*x86-64*) ;;
-        *PE32+*executable*Aarch64*|*PE32+*executable*ARM64*)
-            [ "$2" = arm64 ] || fail "Expected Windows x64 collector: $1" ;;
-        *) fail "Not a Windows executable collector: $1 ($description)" ;;
+    case "$2:$description" in
+        amd64:*PE32+*executable*x86-64*) ;;
+        arm64:*PE32+*executable*Aarch64*|arm64:*PE32+*executable*ARM64*) ;;
+        *) fail "Collector does not match native Windows $2: $1 ($description)" ;;
     esac
 }
 
@@ -113,7 +113,7 @@ build_linux() {
     elif [ "$host_os" = Linux ] && [ "$target_arch" = "$native" ]; then
         command -v "$odin" >/dev/null 2>&1 || fail "Odin compiler not found: $odin"
         "$odin" build "$stage/source" "-target:linux_$target_arch" "-out:$stage/linux-$target_arch" \
-            -o:speed -vet -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536
+            -o:speed -vet -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 "-define:TASK_MASTER_VERSION=$version"
     else
         case "$target_arch" in
             arm64) compiler=${CC_ARM64:-}; sysroot=${LINUX_ARM64_SYSROOT:-}; triple=aarch64-linux-gnu ;;
@@ -135,7 +135,7 @@ build_linux() {
         command -v "$odin" >/dev/null 2>&1 || fail "Odin compiler not found: $odin"
         [ -z "$sysroot" ] || [ -d "$sysroot" ] || fail "No target sysroot: $sysroot"
         "$odin" build "$stage/source" "-target:linux_$target_arch" -build-mode:obj -use-single-module \
-            "-out:$stage/linux-$target_arch.o" -o:speed -vet -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536
+            "-out:$stage/linux-$target_arch.o" -o:speed -vet -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 "-define:TASK_MASTER_VERSION=$version"
         if [ -n "$compiler" ]; then
             command -v "$compiler" >/dev/null 2>&1 || fail "Cross compiler not found: $compiler"
             set -- "$compiler"
@@ -179,7 +179,7 @@ build_darwin() {
     elif [ "$host_os" = Darwin ]; then
         command -v "$odin" >/dev/null 2>&1 || fail "Odin compiler not found: $odin"
         "$odin" build "$stage/source" "-target:darwin_$target_arch" -minimum-os-version:13.0 "-out:$stage/darwin-$target_arch" \
-            -o:speed -vet -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536
+            -o:speed -vet -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 "-define:TASK_MASTER_VERSION=$version"
     elif [ -f "$destination" ]; then
         verify_darwin "$destination" "$target_arch"
         printf 'Keeping %s; import macOS payloads with --mac-dir.\n' "$destination"
@@ -215,28 +215,24 @@ if [ -n "$windows_dir" ]; then
     for filename in task_master-collector-windows-arm64 task_master-collector-windows-arm64.exe; do
         if [ -f "$windows_dir/$filename" ]; then candidate=$windows_dir/$filename; break; fi
     done
-    if [ -n "$candidate" ]; then
-        verify_windows "$candidate" arm64
-        cp "$candidate" "$stage/windows-arm64"
-        mv "$stage/windows-arm64" "$windows_arm64"
-    else
-        cp "$windows_amd64" "$windows_arm64"
-        printf 'Windows ARM64 payload uses Windows 11 x64 emulation.\n'
-    fi
+    [ -n "$candidate" ] || fail "No native Windows ARM64 collector found in $windows_dir"
+    verify_windows "$candidate" arm64
+    cp "$candidate" "$stage/windows-arm64"
+    mv "$stage/windows-arm64" "$windows_arm64"
 elif [ -n "${WINDOWS_SDK_ROOT:-}" ]; then
     [ -d "$WINDOWS_SDK_ROOT" ] || fail "No Windows SDK tree: $WINDOWS_SDK_ROOT"
     command -v lld-link >/dev/null 2>&1 || fail 'Windows cross-linking needs lld-link.'
     command -v "$odin" >/dev/null 2>&1 || fail "Odin compiler not found: $odin"
-    "$odin" build "$stage/source" -target:windows_amd64 "-windows-sdk-root:$WINDOWS_SDK_ROOT" \
-        -linker:lld "-out:$stage/windows-amd64.exe" -o:speed -vet \
-        -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536
-    verify_windows "$stage/windows-amd64.exe" amd64
-    mv "$stage/windows-amd64.exe" "$windows_amd64"
-    cp "$windows_amd64" "$windows_arm64"
-    printf 'Windows ARM64 payload uses Windows 11 x64 emulation.\n'
+    for target_arch in amd64 arm64; do
+        "$odin" build "$stage/source" "-target:windows_$target_arch" "-windows-sdk-root:$WINDOWS_SDK_ROOT" \
+            -linker:lld "-out:$stage/windows-$target_arch.exe" -o:speed -vet \
+            -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 "-define:TASK_MASTER_VERSION=$version"
+        verify_windows "$stage/windows-$target_arch.exe" "$target_arch"
+        mv "$stage/windows-$target_arch.exe" "build/task_master-collector-windows-$target_arch"
+    done
 elif [ -f "$windows_amd64" ]; then
     verify_windows "$windows_amd64" amd64
-    if [ ! -f "$windows_arm64" ]; then cp "$windows_amd64" "$windows_arm64"; fi
+    [ -f "$windows_arm64" ] || fail 'Build or import the native Windows ARM64 collector; x64 emulation payloads are not release inputs.'
     verify_windows "$windows_arm64" arm64
     printf 'Keeping existing Windows collector payloads.\n'
 elif $strict; then

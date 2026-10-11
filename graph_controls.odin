@@ -6,7 +6,7 @@ import "core:math"
 import "core:os"
 import "core:strings"
 import "core:time"
-import glfw "vendor:glfw"
+import glfw "desktop_window"
 
 Graph_Control_Bounds :: struct {x,y,w,h:f32}
 Graph_Settings :: struct {max_time, polling_seconds:f64}
