@@ -57,6 +57,12 @@ platform's normal installer or elevation prompt.
 Development builds and manual installations cannot automatically determine
 their package format; install a release package to enable the updater.
 
+Windows downloads use the built-in Windows PowerShell/.NET HTTPS client;
+curl is not required, including for uncached remote helper downloads. The
+client uses Windows certificate trust and proxy settings, streams downloads
+to disk with byte and time limits, and follows only HTTPS redirects. The
+signed manifest and package checksum checks still apply before installation.
+
 Linux AppImages include a native curl executable and its private runtime
 libraries; the updater uses that copy instead of requiring curl to be
 installed on the host. HTTPS certificate verification uses the host's trusted

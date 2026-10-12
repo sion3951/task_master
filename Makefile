@@ -27,7 +27,7 @@ shaders/ui.vert.spv: shaders/ui.vert
 shaders/ui.frag.spv: shaders/ui.frag
 	$(GLSLC) $(GLSLC_FLAGS) $< -o $@
 
-build/task_master: $(wildcard *.odin) $(WINDOW_SOURCES) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist $(GRAPHICS_SOURCES) assets/DejaVuSans.ttf build/task_master-collector
+build/task_master: $(wildcard *.odin) $(WINDOW_SOURCES) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/update-download-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist $(GRAPHICS_SOURCES) assets/Inter-Regular.ttf build/task_master-collector
 	mkdir -p build
 	$(ODIN) build . -out:$@ -o:speed -no-bounds-check -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(ODIN_NATIVE_FLAGS)
 

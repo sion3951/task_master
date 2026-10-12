@@ -6,7 +6,6 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:io"
 import "core:os"
-import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -287,26 +286,16 @@ updater_verify_package :: proc(path:string,size:i64,expected:string,job:^Update_
     sha2.final(&hash,digest[:])
     return total==size&&digest==wanted
 }
-// AppImages bundle curl; other installs use the native OS or package dependency.
-// No shell interpolation; redirects remain HTTPS with bounded size/time.
+// Windows uses its built-in PowerShell/.NET client; AppImages bundle curl.
+// Platform launchers quote arguments; redirects remain HTTPS with bounded size/time.
 updater_fetch :: proc(job:^Update_Job,url,path:string,limit:i64)->bool {
-    curl:="curl"
-    if job.target.os=="linux"&&job.target.kind=="appimage" {
-        bundled:=fmt.tprintf("%s/curl",filepath.dir(job.target.executable))
-        if os.is_file(bundled) {curl=bundled}
-    }
-    when ODIN_OS==.Windows {curl="curl.exe"}
-    command:=[]string{curl,"--fail","--silent","--show-error","--location","--max-redirs","4",
-        "--proto","=https","--proto-redir","=https","--connect-timeout","10","--max-time","300",
-        "--speed-time","30","--speed-limit","1024","--max-filesize",fmt.tprintf("%d",limit),
-        "--user-agent","task_master-updater","--output",path,"--",url}
     if sync.atomic_load(&job.stop) {return false}
     child:os.Process
     err:os.Error
     child_job:uintptr
     sync.mutex_lock(&remote_spawn_mutex)
-    when ODIN_OS==.Windows {child,child_job,err=updater_windows_fetch_start(command)}
-    else {child,err=os.process_start({command=command})}
+    when ODIN_OS==.Windows {child,child_job,err=updater_windows_fetch_start(url,path,limit)}
+    else {child,err=updater_unix_fetch_start(job,url,path,limit)}
     sync.mutex_unlock(&remote_spawn_mutex)
     if err!=nil {return false}
     defer updater_fetch_process_close(child_job)
@@ -340,7 +329,9 @@ updater_worker :: proc(job:^Update_Job) {
     }
     api_path:=fmt.tprintf("%s/release.json",job.stage)
     if !updater_fetch(job,"https://api.github.com/repos/sion3951/task_master/releases/latest",api_path,1024*1024) {
-        updater_fail(job,"Could not check GitHub. Check your connection and that curl is installed, then try again.");return
+        when ODIN_OS==.Windows {updater_fail(job,"Could not check GitHub. Check your connection and Windows HTTPS/proxy settings, then try again.")}
+        else {updater_fail(job,"Could not check GitHub. Check your connection and that curl is installed, then try again.")}
+        return
     }
     release_bytes,read_ok:=updater_read_bounded(api_path,1024*1024,context.temp_allocator)
     release:Update_GitHub_Release

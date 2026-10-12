@@ -176,7 +176,7 @@ renderer_shader :: proc(r: ^Renderer, data: string) -> vk.ShaderModule {
     return shader
 }
 renderer_font_rasterize :: proc(atlas: ^Font_Atlas) -> bool {
-    font :: #load("assets/DejaVuSans.ttf")
+    font :: #load("assets/Inter-Regular.ttf")
     library: rawptr
     if FT_Init_FreeType(&library) != 0 { fmt.eprintln("Cannot initialize FreeType"); return false }
     defer FT_Done_FreeType(library)

@@ -46,7 +46,7 @@ foreign tm_font_cf {
 }
 
 renderer_font_rasterize :: proc(atlas: ^Font_Atlas) -> bool {
-    font_data :: #load("assets/DejaVuSans.ttf")
+    font_data :: #load("assets/Inter-Regular.ttf")
     provider := darwin_font_provider(nil, raw_data(font_data), uint(len(font_data)), nil)
     if provider == nil { fmt.eprintln("Cannot create CoreText font data provider"); return false }
     defer darwin_font_release(provider)

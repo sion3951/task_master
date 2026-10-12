@@ -109,7 +109,8 @@ remote_helper_download :: proc(system,architecture,kind:string,stop:^bool=nil)->
             limit:=i64(65536) if name=="update.json" else i64(64)
             url:=fmt.tprintf("%s%s/%s",UPDATER_REPOSITORY,updater_url_component(tag),name)
             if !updater_fetch(&job,url,fmt.tprintf("%s/%s",stage,name),limit) {
-                return nil,"Could not download this version's signed remote helper metadata. Internet access is required until the helper is cached; check curl and the published release."
+                when ODIN_OS==.Windows {return nil,"Could not download this version's signed remote helper metadata. Internet access is required until the helper is cached; check your connection, Windows HTTPS/proxy settings and the published release."}
+                else {return nil,"Could not download this version's signed remote helper metadata. Internet access is required until the helper is cached; check curl and the published release."}
             }
         }
         manifest,verified=remote_helper_manifest(stage,version)

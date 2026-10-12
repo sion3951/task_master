@@ -5,7 +5,7 @@ process information you would look for in btop with the GPU information you
 would look for in nvtop. Written in Odin, rendered directly with Metal on macOS
 and Vulkan on Linux and Windows.
 
-## Version 1.0.5
+## Version 1.0.6
 
 - Overview, CPU, GPU and Mem+IO dashboards with live graphs and process tables.
 - Local and SSH-connected machines in one window, with automatic collector deployment.
@@ -16,9 +16,9 @@ and Vulkan on Linux and Windows.
 Download installers from this repository's **Releases** page: Linux AppImage or
 Debian package (x64/ARM64), Windows setup executable, or macOS package
 (Intel/Apple Silicon). Source builds and the installer workflow now provide native
-Windows x64 and ARM64 packages; older x64-only releases use emulation on ARM64. The `v1.0.5` tag
+Windows x64 and ARM64 packages; older x64-only releases use emulation on ARM64. The `v1.0.6` tag
 starts the installer workflow; downloads appear after all builds succeed.
-See the [v1.0.5 release notes](docs/releases/v1.0.5.md) for changes and download
+See the [v1.0.6 release notes](docs/releases/v1.0.6.md) for changes and download
 details, and the installation sections below for platform requirements.
 
 The application name is exactly `task_master`. Debian uses `task-master` for
@@ -64,8 +64,10 @@ make
 ./build/task_master
 ```
 
-Or use `make run`. The font and shaders are embedded, so the resulting binary
-does not need its source directory at runtime.
+Or use `make run`. Inter Regular from the official Inter 4.1 release is used
+throughout the UI. The font and shaders are embedded, so the resulting binary
+does not need its source directory at runtime. The font's SIL Open Font License
+is included in `assets/FONT-LICENSE.txt`.
 
 ## Installers and Linux packages
 
