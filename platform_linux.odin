@@ -3,7 +3,10 @@ package main
 import "core:fmt"
 import "core:sys/posix"
 
-platform_process_init :: proc() { _=posix.signal(.SIGPIPE,auto_cast posix.SIG_IGN) }
+platform_process_init :: proc() {
+    _=posix.signal(.SIGPIPE,auto_cast posix.SIG_IGN)
+    platform_memory_init()
+}
 platform_clock_text :: proc(second:i64)->string {
     seconds:=posix.time_t(second)
     local:posix.tm

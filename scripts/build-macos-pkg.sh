@@ -48,10 +48,12 @@ if not match:
 print(match[1])
 PY
 )
-for binary in task_master task_master-collector; do
+for binary in task_master task_master-collector task_master-update-helper; do
     [ -x "$source_app/Contents/MacOS/$binary" ] || fail "Incomplete app bundle: $source_app"
     lipo "$source_app/Contents/MacOS/$binary" -verify_arch "$apple_arch"
 done
+[ -f "$source_app/Contents/Resources/update-install.sh" ] || fail "Incomplete app bundle: missing update-install.sh"
+python3 scripts/validate-macos-bundle.py "$source_app" "$apple_arch"
 codesign --verify --strict "$source_app"
 mkdir -p build "$output_dir"
 stage=$(mktemp -d build/macos-pkg-stage.XXXXXX)

@@ -25,15 +25,13 @@ updater_platform_target :: proc()->(Update_Target,string) {
 
 updater_platform_install :: proc(target:^Update_Target,package_path,stage:string,parent_pid:i32)->(bool,string) {
     if posix.getuid()==0 {return false,"Run task_master as your normal account to install updates and relaunch safely."}
-    helper:=fmt.tprintf("%s/update-install.sh",stage)
-    error:=os.write_entire_file(helper,#load("scripts/update-install-unix.sh"),{.Read_User,.Write_User})
-    if error!=nil {return false,fmt.tprintf("Could not stage the update helper: %v",error)}
-    if !platform_private_path(helper,false) {return false,"Could not protect the update helper."}
+    helper,error:=updater_installed_launcher(target)
+    if error!="" {return false,error}
     log,log_error:=os.open(fmt.tprintf("%s/install.log",stage),{.Write,.Create,.Trunc},{.Read_User,.Write_User})
     if log_error!=nil {return false,fmt.tprintf("Could not open the installation log: %v",log_error)}
     defer os.close(log)
     sync.mutex_lock(&remote_spawn_mutex)
-    _,start_error:=os.process_start({command=[]string{"/bin/sh",helper,target.os,target.kind,package_path,stage,fmt.tprintf("%d",parent_pid),target.executable,target.portable_path,target.sha256,fmt.tprintf("%d",target.size)},stdout=log,stderr=log})
+    _,start_error:=os.process_start({command=[]string{"/bin/sh",helper,target.os,target.kind,package_path,stage,fmt.tprintf("%d",parent_pid),target.executable,target.portable_path,target.sha256,fmt.tprintf("%d",target.size)},stdout=log,stderr=log,env=updater_install_environment()})
     sync.mutex_unlock(&remote_spawn_mutex)
     if start_error!=nil {return false,fmt.tprintf("Could not start the update installer: %v",start_error)}
     return true,""

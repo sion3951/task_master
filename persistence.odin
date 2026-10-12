@@ -18,6 +18,7 @@ PERSISTENCE_LIVE_SAMPLES :: 22
 // Display snapshots use the same validated wire format as SSH. Private sampler
 // counters, GPU handles and file descriptors never enter the cache.
 Persistence_Sample :: struct {
+    processes: Process_Snapshot_Cache,
     generation: u64,
     timestamp: f64,
     polling_seconds: f64,
@@ -206,6 +207,7 @@ persistence_cache_read :: proc(m:^Machine,live:bool=false)->(cache:Persistence_C
         if s.memory_free>s.memory_total||s.memory_cached>s.memory_total||s.memory_buffers>s.memory_total {return}
         for x in s.logical {if !remote_nonnegative(x)||x>100 {return}}
         for x in s.overview {if !remote_nonnegative(x)||x>100 {return}}
+        if !process_history_valid(s.processes) {return}
         if !gpu_sample_valid(s.gpu) {return}
         for gpu in s.gpus {if !gpu_sample_valid(gpu) {return}}
         for power in s.cpu_package_power {if power.package_id<0||!remote_nonnegative(power.watts) {return}}
@@ -230,7 +232,8 @@ persistence_cache_apply :: proc(a:^App,m:^Machine,cache:Persistence_Cache,restor
     state.cpu_pinned_slot=-1
     state.memory_pinned_slot=-1
     mem.zero_item(&state.history)
-    mem.zero_slice(state.cpu_history[:])
+    // Each restored sample is fully initialized below. Clearing the unused
+    // maximum ring would commit pages that no retained observation needs.
     for s,i in cache.samples {
         sample:=&state.cpu_history[i]
         sample^=CPU_Sample{generation=s.generation,timestamp=s.timestamp,polling_seconds=s.polling_seconds,lower=s.lower,upper=s.upper,
@@ -244,6 +247,7 @@ persistence_cache_apply :: proc(a:^App,m:^Machine,cache:Persistence_Cache,restor
             swap_total=s.swap_total,swap_used=s.swap_used,disk_read=s.disk_read,disk_write=s.disk_write,
             network_rx=s.network_rx,network_tx=s.network_tx,
             ram_available=s.ram_available,rates_ready=s.rates_ready,network_rates_ready=s.network_rates_ready}
+        process_history_restore(&sample.processes,s.processes)
         copy(sample.cores[:],s.cores);copy(sample.logical[:],s.logical)
         sample.gpu=gpu_cache_sample(s,&state.metrics,restore_snapshot&&cache.snapshot!=""&&s.timestamp==cache.sampled_at)
         history_device_cache(sample,s)
@@ -253,6 +257,7 @@ persistence_cache_apply :: proc(a:^App,m:^Machine,cache:Persistence_Cache,restor
         if s.timestamp==memory_pinned {state.memory_pinned_slot=i}
     }
     state.history_count=len(cache.samples);state.history_next=len(cache.samples)%HISTORY_CAPACITY
+    history_storage_trim(state)
     if restore_snapshot&&cache.snapshot!=""&&state.history_count>0 {
         latest:=&state.cpu_history[state.history_count-1]
         if latest.timestamp==cache.sampled_at {
@@ -268,7 +273,6 @@ persistence_cache_apply :: proc(a:^App,m:^Machine,cache:Persistence_Cache,restor
     return true
 }
 persistence_local_captured:bool
-persistence_local_needs_prime:bool
 persistence_local_nvml:bool
 persistence_local_gpu_count:int
 persistence_local_power_source:CPU_Power_Source
@@ -326,7 +330,7 @@ persistence_cache_write :: proc(a:^App,m:^Machine,live:bool=false)->bool {
         core_count,logical_count:=len(source.cores),len(source.logical)
         for core_count>0&&source.cores[core_count-1]==(CPU_Core_Sample{}) {core_count-=1}
         for logical_count>0&&source.logical[logical_count-1]==0 {logical_count-=1}
-        destination=Persistence_Sample{generation=source.generation,timestamp=source.timestamp,polling_seconds=source.polling_seconds,
+        destination=Persistence_Sample{processes=process_history_cache(&source.processes),generation=source.generation,timestamp=source.timestamp,polling_seconds=source.polling_seconds,
             continuity_recorded=source.continuity_recorded,gap_before=source.gap_before,
             lower=source.lower,upper=source.upper,threads=source.threads,power_watts=source.power_watts,
             frequency_mhz=source.frequency_mhz,power_available=source.power_available,
@@ -487,6 +491,9 @@ persistence_service_main :: proc() {
     local:=a.local_machine
     local.status=.Live;local.message_len=0;local.has_sample=true
     local.state.history_handoff_pending=true
+    local.received=local.state.metrics._sample_started
+    if !local_sampler_start(a) {fmt.eprintln("Could not start the local telemetry worker.");return}
+    defer machines_disconnect(a)
     publisher:=persistence_publisher_start()
     if publisher==nil {fmt.eprintln("Could not start the persistence cache publisher.");return}
     defer persistence_publisher_destroy(publisher)
@@ -499,7 +506,7 @@ persistence_service_main :: proc() {
     defer delete(live_publications)
     started:=time.tick_now()
     // Keep the actual counter-baseline time when cache restoration took time.
-    local.state.last_sample=-time.duration_seconds(time.tick_since(local.state.metrics._sample_started))
+    local.state.last_sample=-time.duration_seconds(time.tick_since(local.received))
     last_config:f64=-1
     last_publication:f64=-1
     for !persistence_platform_service_stop_requested() {
@@ -544,12 +551,13 @@ persistence_service_main :: proc() {
         }
         mem.free_all(context.temp_allocator)
         now=time.duration_seconds(time.tick_since(started))
-        // Wake for the next sample, while checking shared settings promptly
-        // even when the user selects a ten-second polling interval.
-        wait:=max(0.001,min(0.1,local.state.last_sample+a.interval-now))
-        time.sleep(time.Duration(wait*1e9))
+        // Hardware collection runs independently; drain its queue and check
+        // shared settings without spinning while a hardware query is running.
+        time.sleep(time.Duration(min(0.1,a.interval)*1e9))
     }
     // Include the last sub-second batch when the service stops normally.
+    local_sampler_stop(local.local_sampler)
+    machines_sample(a,time.duration_seconds(time.tick_since(started)))
     for m in a.machines[:] {
         persistence_publisher_submit(publisher,m)
         persistence_publisher_submit(live_publisher,m)

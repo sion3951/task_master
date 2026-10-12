@@ -15,12 +15,20 @@ graph_freeze_capture :: proc(m:^Machine) {
         metrics_display_copy(&frozen.metrics,&live.metrics)
         frozen.selected_cpu,frozen.selected_gpu=live.selected_cpu,live.selected_gpu
         frozen.io_summary=live.io_summary
-        frozen.history=live.history;frozen.cpu_history=live.cpu_history
+        // Copy every retained observation without committing unused ring slots.
+        // Keeping its original slot also preserves the pinned-sample indices.
+        first:=(live.history_next-live.history_count+HISTORY_CAPACITY)%HISTORY_CAPACITY
+        for offset in 0..<live.history_count {
+            slot:=(first+offset)%HISTORY_CAPACITY
+            frozen.cpu_history[slot]=live.cpu_history[slot]
+            for kind in 0..<4 {frozen.history[kind][slot]=live.history[kind][slot]}
+        }
         frozen.history_count,frozen.history_next=live.history_count,live.history_next
         frozen.cpu_pinned_slot,frozen.cpu_pinned_graph=live.cpu_pinned_slot,live.cpu_pinned_graph
         frozen.gpu_pinned_slot,frozen.gpu_pinned_graph=live.gpu_pinned_slot,live.gpu_pinned_graph
         frozen.memory_pinned_slot,frozen.memory_pinned_graph=live.memory_pinned_slot,live.memory_pinned_graph
     }
+    history_storage_trim(frozen)
     m.frozen_graphs=frozen
 }
 

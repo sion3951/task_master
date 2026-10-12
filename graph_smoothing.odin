@@ -7,7 +7,7 @@ import "core:math"
 Graph_Smoothing :: struct {
     cpu_history: [HISTORY_CAPACITY]CPU_Sample,
     history: [4][HISTORY_CAPACITY]f32,
-    initialized: bool,
+    initialized, identity: bool,
     latest_slot: int,
     latest_timestamp: f64,
     history_count: int,
@@ -93,12 +93,33 @@ graph_smoothing_append :: proc(a:^App,cache:^Graph_Smoothing,slot:int,previous_s
 graph_smoothing_prepare :: proc(a:^App)->^Graph_Smoothing {
     if a.graph_smoothing==nil {a.graph_smoothing=new(Graph_Smoothing)}
     cache:=a.graph_smoothing
-    if a.history_count<=0 {cache.initialized=false;return cache}
+    if a.history_count<=0 {
+        if cache.history_count>0 {history_storage_trim_samples(cache.cpu_history[:],0,0)}
+        cache.initialized=false
+        cache.history_count=0
+        return cache
+    }
     latest:=(a.history_next+HISTORY_CAPACITY-1)%HISTORY_CAPACITY
     latest_timestamp:=a.cpu_history[latest].timestamp
     first:=(a.history_next-a.history_count+HISTORY_CAPACITY)%HISTORY_CAPACITY
     first_timestamp:=a.cpu_history[first].timestamp
     if cache.initialized&&cache.latest_slot==latest&&cache.latest_timestamp==latest_timestamp&&cache.history_count==a.history_count&&cache.first_timestamp==first_timestamp {return cache}
+    needs_filter:=false
+    for offset in 0..<a.history_count {
+        slot:=(first+offset)%HISTORY_CAPACITY
+        interval:=a.cpu_history[slot].polling_seconds
+        if interval>0&&interval<1 {needs_filter=true;break}
+    }
+    // At the established 1-second cadence the filter is exactly the identity.
+    // Use recorded values directly instead of duplicating every full sample.
+    if !needs_filter {
+        if !cache.identity {history_storage_trim_samples(cache.cpu_history[:],0,0)}
+        cache.identity=true;cache.initialized=true
+        cache.latest_slot=latest;cache.latest_timestamp=latest_timestamp
+        cache.history_count=a.history_count;cache.first_timestamp=first_timestamp
+        return cache
+    }
+    if cache.identity {cache.initialized=false;cache.identity=false}
     start,previous_slot:=first,-1
     // Reuse previous filtered points while the source ring still contains the
     // last processed sample. Normal polling therefore filters only new data.
@@ -116,10 +137,12 @@ graph_smoothing_prepare :: proc(a:^App)->^Graph_Smoothing {
     }
     cache.initialized=true;cache.latest_slot=latest;cache.latest_timestamp=latest_timestamp
     cache.history_count=a.history_count;cache.first_timestamp=first_timestamp
+    history_storage_trim_samples(cache.cpu_history[:],a.history_count,a.history_next)
     return cache
 }
 
 graph_plot_sample :: proc(a:^App,slot:int)->^CPU_Sample {
+    if a.graph_smoothing.identity {return &a.cpu_history[slot]}
     return &a.graph_smoothing.cpu_history[slot]
 }
 

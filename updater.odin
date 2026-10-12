@@ -1,6 +1,5 @@
 package main
 
-import "core:crypto/ed25519"
 import "core:crypto/sha2"
 import "core:encoding/json"
 import "core:fmt"
@@ -10,13 +9,14 @@ import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import security "updater_security"
 
 
 UPDATER_VERSION :: #config(TASK_MASTER_VERSION,string(#load("VERSION")))
-UPDATER_PUBLIC_KEY :: string(#load("assets/update-public-key.hex"))
-UPDATER_REPOSITORY :: "https://github.com/sion3951/task_master/releases/download/"
+UPDATER_PUBLIC_KEY :: security.PUBLIC_KEY
+UPDATER_REPOSITORY :: security.REPOSITORY
 UPDATER_INTERVAL :: 6*60*60
-UPDATER_MAX_PACKAGE :: i64(1024*1024*1024)
+UPDATER_MAX_PACKAGE :: security.MAX_PACKAGE
 
 Update_State :: enum {Idle,Checking,Downloading,Ready,Current,Error}
 Update_Target :: struct {
@@ -24,11 +24,8 @@ Update_Target :: struct {
     sha256:string,
     size:i64,
 }
-Update_Asset :: struct {
-    os,arch,kind,name,sha256,url:string,
-    size:i64,
-}
-Update_Manifest :: struct {schema:int,version:string,assets:[]Update_Asset}
+Update_Asset :: security.Asset
+Update_Manifest :: security.Manifest
 Update_GitHub_Asset :: struct {name,browser_download_url:string}
 Update_GitHub_Release :: struct {tag_name:string,draft,prerelease:bool,assets:[]Update_GitHub_Asset}
 Update_Settings :: struct {automatic:bool,last_checked:f64}
@@ -193,73 +190,12 @@ updater_destroy :: proc(a:^App) {
     delete(u.directory);delete(u.message);free(u);a.updater=nil
 }
 
-// Stable releases only, with numeric comparison (1.10.0 > 1.9.0).
-updater_version_parse :: proc(input:string)->([3]u64,bool) {
-    value:=strings.trim_space(input)
-    if strings.has_prefix(value,"v") {value=value[1:]}
-    if at:=strings.index(value,"+");at>=0 {
-        metadata:=value[at+1:]
-        if len(metadata)==0||metadata[0]=='.'||metadata[len(metadata)-1]=='.'||strings.contains(metadata,"..") {return {},false}
-        for c in transmute([]u8)metadata {
-            if !((c>='0'&&c<='9')||(c>='A'&&c<='Z')||(c>='a'&&c<='z')||c=='-'||c=='.') {return {},false}
-        }
-        value=value[:at]
-    }
-    parts:=strings.split(value,".",context.temp_allocator)
-    result:[3]u64
-    if len(parts)!=3 {return result,false}
-    for part,i in parts {
-        if len(part)==0||len(part)>18||(len(part)>1&&part[0]=='0') {return result,false}
-        for c in transmute([]u8)part {if c<'0'||c>'9' {return result,false};result[i]=result[i]*10+u64(c-'0')}
-    }
-    return result,true
-}
-updater_version_newer :: proc(candidate,current:string)->(bool,bool) {
-    remote,rok:=updater_version_parse(candidate)
-    local_value:=strings.trim_space(current)
-    if at:=strings.index(local_value,"+");at>=0 {local_value=local_value[:at]}
-    prerelease:=false
-    if at:=strings.index(local_value,"-");at>=0 {
-        if at==len(local_value)-1 {return false,false}
-        prerelease=true;local_value=local_value[:at]
-    }
-    local,lok:=updater_version_parse(local_value)
-    if !rok||!lok {return false,false}
-    for i in 0..<3 {if remote[i]!=local[i] {return remote[i]>local[i],true}}
-    return prerelease,true
-}
-updater_hex :: proc(input:string,out:[]u8)->bool {
-    value:=strings.trim_space(input)
-    if len(value)!=len(out)*2 {return false}
-    for &byte,i in out {
-        v:u8
-        for c in transmute([]u8)value[i*2:i*2+2] {
-            v*=16
-            if c>='0'&&c<='9' {v+=c-'0'} else if c>='a'&&c<='f' {v+=c-'a'+10} else {return false}
-        }
-        byte=v
-    }
-    return true
-}
-updater_url_component :: proc(value:string)->string {
-    builder:=strings.builder_make(context.temp_allocator)
-    digits:="0123456789ABCDEF"
-    for c in transmute([]u8)value {
-        if (c>='0'&&c<='9')||(c>='A'&&c<='Z')||(c>='a'&&c<='z')||c=='-'||c=='_'||c=='.'||c=='~' {
-            strings.write_byte(&builder,c)
-        } else {
-            strings.write_byte(&builder,'%');strings.write_byte(&builder,digits[c>>4]);strings.write_byte(&builder,digits[c&15])
-        }
-    }
-    return strings.to_string(builder)
-}
-updater_release_url :: proc(url,tag,name:string)->bool {
-    if name==""||len(name)>240||strings.contains_any(name,"/\\\r\n\t?#%")||name=="."||name==".." {return false}
-    // The release publisher escapes '+' in SemVer build metadata. GitHub may
-    // return its equivalent unescaped URL in discovery metadata.
-    canonical:=fmt.tprintf("%s%s/%s",UPDATER_REPOSITORY,updater_url_component(tag),updater_url_component(name))
-    return url==canonical||url==fmt.tprintf("%s%s/%s",UPDATER_REPOSITORY,tag,name)
-}
+updater_version_parse :: security.version_parse
+updater_version_newer :: security.version_newer
+updater_hex :: security.hex
+updater_url_component :: security.url_component
+updater_release_url :: security.release_url
+
 updater_verify_package :: proc(path:string,size:i64,expected:string,job:^Update_Job=nil)->bool {
     digest,wanted:[32]u8
     if size<=0||size>UPDATER_MAX_PACKAGE||!updater_hex(expected,wanted[:]) {return false}
@@ -354,15 +290,11 @@ updater_worker :: proc(job:^Update_Job) {
     }
     manifest_bytes,mok:=updater_read_bounded(manifest_path,65536,context.temp_allocator)
     signature,sok:=updater_read_bounded(signature_path,64,context.temp_allocator)
-    key_bytes:[32]u8
-    key:ed25519.Public_Key
-    if !mok||!sok||len(signature)!=64||!updater_hex(UPDATER_PUBLIC_KEY,key_bytes[:])||
-        !ed25519.public_key_set_bytes(&key,key_bytes[:])||!ed25519.verify(&key,manifest_bytes,signature) {
+    manifest,verified:=security.verify_manifest(manifest_bytes,signature)
+    if !mok||!sok||!verified {
         updater_fail(job,"Update signature verification failed. Nothing was installed.");return
     }
-    manifest:Update_Manifest
-    if json.unmarshal(manifest_bytes,&manifest,allocator=context.temp_allocator)!=nil||manifest.schema!=1||
-        strings.trim_prefix(release.tag_name,"v")!=manifest.version {
+    if strings.trim_prefix(release.tag_name,"v")!=manifest.version {
         updater_fail(job,"The signed update manifest is invalid or belongs to a different release.");return
     }
     asset:Update_Asset

@@ -11,6 +11,7 @@ import "core:strings"
 import "core:math"
 import "core:time"
 import "core:thread"
+import "core:os"
 
 // FreeType's public C structure prefixes. Only fields through the rendered
 // bitmap are needed; the library owns the complete structures and their tails.
@@ -59,6 +60,8 @@ foreign freetype {
     FT_Init_FreeType :: proc(library: ^rawptr) -> c.int ---
     FT_Done_FreeType :: proc(library: rawptr) -> c.int ---
     FT_New_Memory_Face :: proc(library: rawptr, data: [^]u8, length, index: c.long, face: ^^FT_Face) -> c.int ---
+    FT_New_Face :: proc(library:rawptr,path:cstring,index:c.long,face:^^FT_Face)->c.int ---
+    FT_Get_Char_Index :: proc(face:^FT_Face,codepoint:c.ulong)->c.uint ---
     FT_Done_Face :: proc(face: ^FT_Face) -> c.int ---
     FT_Set_Pixel_Sizes :: proc(face: ^FT_Face, width, height: c.uint) -> c.int ---
     FT_Load_Char :: proc(face: ^FT_Face, codepoint: c.ulong, flags: c.int) -> c.int ---
@@ -103,6 +106,7 @@ Renderer :: struct {
     fonts: [len(FONT_SIZES)]Font_Size,
     font_scale: f32,
     atlas_height: int,
+    atlas: Font_Atlas,
     pipeline_binaries: bool,
 }
 renderer_ok :: proc(result: vk.Result, action: string) -> bool {
@@ -177,61 +181,137 @@ renderer_shader :: proc(r: ^Renderer, data: string) -> vk.ShaderModule {
 }
 renderer_font_rasterize :: proc(atlas: ^Font_Atlas) -> bool {
     font :: #load("assets/Inter-Regular.ttf")
-    library: rawptr
-    if FT_Init_FreeType(&library) != 0 { fmt.eprintln("Cannot initialize FreeType"); return false }
-    defer FT_Done_FreeType(library)
-    face: ^FT_Face
-    if FT_New_Memory_Face(library,raw_data(font),c.long(len(font)),0,&face) != 0 { return false }
-    defer FT_Done_Face(face)
-    // Rasterize all UI sizes once at native framebuffer resolution, with the
-    // font's TrueType hinting. No large glyph is downsampled into small text.
-    atlas.pixels = make([dynamic]u8,ATLAS_SIZE*64,ATLAS_SIZE*64)
-    x, y, row_height := 3, 1, 0
+    if FT_Init_FreeType(&atlas.library)!=0 {fmt.eprintln("Cannot initialize FreeType");return false}
+    face:^FT_Face
+    if FT_New_Memory_Face(atlas.library,raw_data(font),c.long(len(font)),0,&face)!=0 {return false}
+    atlas.face=face
+    when ODIN_OS==.Linux {atlas.pixels=make([dynamic]u8,ATLAS_SIZE*128)}
+    else {atlas.pixels=make([dynamic]u8,ATLAS_SIZE*ATLAS_HEIGHT)}
+    atlas.x=3;atlas.y=1
     for logical_size,i in FONT_SIZES {
-        pixel_size := max(1,int(math.round(logical_size*atlas.scale)))
+        pixel_size:=max(1,int(math.round(logical_size*atlas.scale)))
         atlas.fonts[i].pixels=f32(pixel_size)
-        if FT_Set_Pixel_Sizes(face,0,c.uint(pixel_size)) != 0 { return false }
         for codepoint in 32..<127 {
-            // FT_LOAD_RENDER | FT_LOAD_NO_BITMAP: grayscale hinted outlines.
-            if FT_Load_Char(face,c.ulong(codepoint),(1<<2)|(1<<3)) != 0 { return false }
-            slot := face.glyph
-            bitmap := slot.bitmap
-            w, h := int(bitmap.width),int(bitmap.rows)
-            if x+w+1 >= ATLAS_SIZE { x=1; y+=row_height+2; row_height=0 }
-            if y+h+1 >= 4096 { fmt.eprintln("Font atlas exceeds capacity"); return false }
-            needed := (y+h+2)*ATLAS_SIZE
-            if needed>len(atlas.pixels) {
-                size:=len(atlas.pixels)
-                for size<needed {size*=2}
-                if resize(&atlas.pixels,size)!=nil {return false}
-            }
-            if w > 0 && h > 0 {
-                if bitmap.pixel_mode != 2 { fmt.eprintln("Expected grayscale font bitmap"); return false }
-                for row in 0..<h {
-                    source_row := row
-                    if bitmap.pitch < 0 { source_row=h-1-row }
-                    source := &bitmap.buffer[source_row*abs(int(bitmap.pitch))]
-                    mem.copy(&atlas.pixels[(y+row)*ATLAS_SIZE+x],source,w)
-                }
-            }
-            atlas.fonts[i].glyphs[codepoint-32]={x=x,y=y,width=w,height=h,
-                left=int(slot.bitmap_left),top=int(slot.bitmap_top),advance=f32(slot.advance[0])/64}
-            x+=w+2; row_height=max(row_height,h)
+            glyph,ok:=renderer_font_freetype_glyph(atlas,face,i,rune(codepoint))
+            if !ok {return false}
+            atlas.fonts[i].glyphs[codepoint-32]=glyph
         }
     }
-    // Vulkan supports non-power-of-two textures; unused rows need no GPU copy.
-    atlas.height=max(64,y+row_height+2)
-    pixels := atlas.pixels[:ATLAS_SIZE*atlas.height]
-    // Reserve a white texel for solid geometry; glyph padding leaves this corner free.
-    pixels[0]=255; pixels[1]=255; pixels[ATLAS_SIZE]=255; pixels[ATLAS_SIZE+1]=255
+    atlas.pixels[0]=255;atlas.pixels[1]=255
+    atlas.pixels[ATLAS_SIZE]=255;atlas.pixels[ATLAS_SIZE+1]=255
+    renderer_font_prepare(atlas)
+    atlas.dirty=false
     return true
 }
+renderer_font_freetype_glyph :: proc(atlas:^Font_Atlas,face:^FT_Face,index:int,ch:rune)->(glyph:Font_Glyph,ok:bool) {
+    if FT_Set_Pixel_Sizes(face,0,c.uint(atlas.fonts[index].pixels))!=0 {return {},false}
+    // Native-size hinted grayscale outlines retain the existing crisp stems.
+    if FT_Load_Char(face,c.ulong(ch),(1<<2)|(1<<3))!=0 {return {},false}
+    slot:=face.glyph
+    bitmap:=slot.bitmap
+    w,h:=int(bitmap.width),int(bitmap.rows)
+    if w>0 && h>0 && bitmap.pixel_mode!=2 {return {},false}
+    x,y,packed:=renderer_font_pack(atlas,w,h)
+    if !packed {return {},false}
+    if w>0 && h>0 {
+        for row in 0..<h {
+            source_row:=row
+            if bitmap.pitch<0 {source_row=h-1-row}
+            mem.copy(&atlas.pixels[(y+row)*ATLAS_SIZE+x],&bitmap.buffer[source_row*abs(int(bitmap.pitch))],w)
+        }
+    }
+    atlas.dirty=true
+    return {x=x,y=y,width=w,height=h,left=int(slot.bitmap_left),top=int(slot.bitmap_top),advance=f32(slot.advance[0])/64},true
+}
+renderer_font_scan_directory :: proc(atlas:^Font_Atlas,path:string) {
+    if path=="" {return}
+    walker:=os.walker_create(path)
+    defer os.walker_destroy(&walker)
+    for info in os.walker_walk(&walker) {
+        if len(atlas.sources)>=512 {break}
+        if info.type==.Directory {continue}
+        extension:=strings.to_lower(info.name,context.temp_allocator)
+        if !strings.has_suffix(extension,".ttf") && !strings.has_suffix(extension,".otf") && !strings.has_suffix(extension,".ttc") {continue}
+        append(&atlas.sources,Font_Source{path=strings.clone(info.fullpath)})
+    }
+}
+renderer_font_scan :: proc(atlas:^Font_Atlas) {
+    atlas.sources_scanned=true
+    when ODIN_OS==.Windows {
+        system_root:=os.get_env("SystemRoot",context.temp_allocator)
+        if system_root!="" {renderer_font_scan_directory(atlas,fmt.tprintf("%s/Fonts",system_root))}
+        local:=os.get_env("LOCALAPPDATA",context.temp_allocator)
+        if local!="" {renderer_font_scan_directory(atlas,fmt.tprintf("%s/Microsoft/Windows/Fonts",local))}
+    } else {
+        renderer_font_scan_directory(atlas,"/usr/share/fonts")
+        renderer_font_scan_directory(atlas,"/usr/local/share/fonts")
+        home:=os.get_env("HOME",context.temp_allocator)
+        data:=os.get_env("XDG_DATA_HOME",context.temp_allocator)
+        if data!="" {renderer_font_scan_directory(atlas,fmt.tprintf("%s/fonts",data))}
+        else if home!="" {renderer_font_scan_directory(atlas,fmt.tprintf("%s/.local/share/fonts",home))}
+        if home!="" {renderer_font_scan_directory(atlas,fmt.tprintf("%s/.fonts",home))}
+    }
+}
+renderer_font_unicode :: proc(atlas:^Font_Atlas,index:int,ch:rune)->(Font_Glyph,bool) {
+    face:=cast(^FT_Face)atlas.face
+    if FT_Get_Char_Index(face,c.ulong(ch))!=0 {return renderer_font_freetype_glyph(atlas,face,index,ch)}
+    if !atlas.sources_scanned {renderer_font_scan(atlas)}
+    for &source in atlas.sources {
+        if !source.attempted {
+            source.attempted=true
+            fallback:^FT_Face
+            if FT_New_Face(atlas.library,strings.clone_to_cstring(source.path,context.temp_allocator),0,&fallback)==0 {source.face=fallback}
+            when ODIN_OS==.Windows {
+                // FreeType's narrow path API cannot open every Unicode user
+                // profile. Odin opens it through the native wide-path API.
+                if source.face==nil {
+                    data,error:=os.read_entire_file(source.path,context.allocator)
+                    if error==nil {
+                        if FT_New_Memory_Face(atlas.library,raw_data(data),c.long(len(data)),0,&fallback)==0 {source.face=fallback;source.data=data}
+                        else {delete(data)}
+                    }
+                }
+            }
+        }
+        fallback:=cast(^FT_Face)source.face
+        if fallback==nil || FT_Get_Char_Index(fallback,c.ulong(ch))==0 {continue}
+        if glyph,ok:=renderer_font_freetype_glyph(atlas,fallback,index,ch);ok {return glyph,true}
+    }
+    return {},false
+}
+renderer_font_dispose :: proc(atlas:^Font_Atlas) {
+    for source in atlas.sources {
+        if source.face!=nil {FT_Done_Face(cast(^FT_Face)source.face)}
+        delete(source.path);delete(source.data)
+    }
+    delete(atlas.sources)
+    if atlas.face!=nil {FT_Done_Face(cast(^FT_Face)atlas.face)}
+    if atlas.library!=nil {FT_Done_FreeType(atlas.library)}
+    delete(atlas.pixels);delete(atlas.unicode)
+    atlas^={}
+}
 renderer_font_upload :: proc(r: ^Renderer, atlas: ^Font_Atlas) -> bool {
-    pixels := atlas.pixels[:ATLAS_SIZE*atlas.height]
+    old_image,old_memory,old_view:=r.font_image,r.font_memory,r.font_view
+    r.font_image=0;r.font_memory=0;r.font_view=0
+    uploaded:=false
+    defer {
+        if uploaded {
+            if old_view!=0 {vk.DestroyImageView(r.device,old_view,nil)}
+            if old_image!=0 {vk.DestroyImage(r.device,old_image,nil)}
+            if old_memory!=0 {vk.FreeMemory(r.device,old_memory,nil)}
+        } else {
+            if r.font_view!=0 {vk.DestroyImageView(r.device,r.font_view,nil)}
+            if r.font_image!=0 {vk.DestroyImage(r.device,r.font_image,nil)}
+            if r.font_memory!=0 {vk.FreeMemory(r.device,r.font_memory,nil)}
+            r.font_image,r.font_memory,r.font_view=old_image,old_memory,old_view
+        }
+    }
+    pixels := atlas.pixels[:]
+    texture_height:=len(pixels)/ATLAS_SIZE
     r.fonts=atlas.fonts
     r.atlas_height=atlas.height
     image_info := vk.ImageCreateInfo{sType=.IMAGE_CREATE_INFO,imageType=.D2,format=.R8_UNORM,
-        extent={ATLAS_SIZE,u32(r.atlas_height),1},mipLevels=1,arrayLayers=1,samples={._1},tiling=.OPTIMAL,
+        extent={ATLAS_SIZE,u32(texture_height),1},mipLevels=1,arrayLayers=1,samples={._1},tiling=.OPTIMAL,
         usage={.TRANSFER_DST,.SAMPLED},sharingMode=.EXCLUSIVE,initialLayout=.UNDEFINED}
     if !renderer_ok(vk.CreateImage(r.device,&image_info,nil,&r.font_image), "font image") { return false }
     req: vk.MemoryRequirements
@@ -242,11 +322,13 @@ renderer_font_upload :: proc(r: ^Renderer, atlas: ^Font_Atlas) -> bool {
     if !renderer_ok(vk.AllocateMemory(r.device,&alloc,nil,&r.font_memory), "font memory") { return false }
     if !renderer_ok(vk.BindImageMemory(r.device,r.font_image,r.font_memory,0), "bind font") { return false }
     staging: vk.Buffer; memory: vk.DeviceMemory
+    defer {
+        if staging!=0 {vk.DestroyBuffer(r.device,staging,nil)}
+        if memory!=0 {vk.FreeMemory(r.device,memory,nil)}
+    }
     if !renderer_buffer(r,len(pixels),{.TRANSFER_SRC},&staging,&memory) { return false }
-    defer vk.FreeMemory(r.device,memory,nil)
-    defer vk.DestroyBuffer(r.device,staging,nil)
     mapped: rawptr
-    vk.MapMemory(r.device,memory,0,vk.DeviceSize(len(pixels)),{},&mapped)
+    if !renderer_ok(vk.MapMemory(r.device,memory,0,vk.DeviceSize(len(pixels)),{},&mapped),"map font staging") {return false}
     mem.copy(mapped,raw_data(pixels),len(pixels)); vk.UnmapMemory(r.device,memory)
     begin := vk.CommandBufferBeginInfo{sType=.COMMAND_BUFFER_BEGIN_INFO,flags={.ONE_TIME_SUBMIT}}
     vk.BeginCommandBuffer(r.command,&begin)
@@ -254,7 +336,7 @@ renderer_font_upload :: proc(r: ^Renderer, atlas: ^Font_Atlas) -> bool {
         srcQueueFamilyIndex=vk.QUEUE_FAMILY_IGNORED,dstQueueFamilyIndex=vk.QUEUE_FAMILY_IGNORED,
         image=r.font_image,subresourceRange={aspectMask={.COLOR},levelCount=1,layerCount=1},dstAccessMask={.TRANSFER_WRITE}}
     vk.CmdPipelineBarrier(r.command,{.TOP_OF_PIPE},{.TRANSFER},{},0,nil,0,nil,1,&barrier)
-    region := vk.BufferImageCopy{imageSubresource={aspectMask={.COLOR},layerCount=1},imageExtent={ATLAS_SIZE,u32(r.atlas_height),1}}
+    region := vk.BufferImageCopy{imageSubresource={aspectMask={.COLOR},layerCount=1},imageExtent={ATLAS_SIZE,u32(texture_height),1}}
     vk.CmdCopyBufferToImage(r.command,staging,r.font_image,.TRANSFER_DST_OPTIMAL,1,&region)
     barrier.oldLayout=.TRANSFER_DST_OPTIMAL; barrier.newLayout=.SHADER_READ_ONLY_OPTIMAL
     barrier.srcAccessMask={.TRANSFER_WRITE}; barrier.dstAccessMask={.SHADER_READ}
@@ -281,21 +363,22 @@ renderer_font_upload :: proc(r: ^Renderer, atlas: ^Font_Atlas) -> bool {
     write := vk.WriteDescriptorSet{sType=.WRITE_DESCRIPTOR_SET,dstSet=r.descriptor,descriptorCount=1,descriptorType=.COMBINED_IMAGE_SAMPLER,pImageInfo=&image}
     vk.UpdateDescriptorSets(r.device,1,&write,0,nil)
     r.font_scale=atlas.scale
+    uploaded=true;atlas.dirty=false
     return true
 }
 renderer_font :: proc(r: ^Renderer, scale: f32) -> bool {
     atlas:=Font_Atlas{scale=scale}
-    defer delete(atlas.pixels)
-    return renderer_font_rasterize(&atlas)&&renderer_font_upload(r,&atlas)
+    defer renderer_font_dispose(&atlas)
+    if !renderer_font_rasterize(&atlas)||!renderer_font_upload(r,&atlas) {return false}
+    renderer_font_accept(r,&atlas)
+    return true
 }
 renderer_set_scale :: proc(r: ^Renderer, scale: f32) -> bool {
+    renderer_font_begin(r)
     target_scale := clamp(scale,0.5,4.0)
     if abs(r.font_scale-target_scale) < 0.001 { return true }
     // This runs only when the monitor DPI changes, before generating vertices.
     if !renderer_ok(vk.DeviceWaitIdle(r.device),"wait font resize") { return false }
-    if r.font_view != 0 { vk.DestroyImageView(r.device,r.font_view,nil); r.font_view=0 }
-    if r.font_image != 0 { vk.DestroyImage(r.device,r.font_image,nil); r.font_image=0 }
-    if r.font_memory != 0 { vk.FreeMemory(r.device,r.font_memory,nil); r.font_memory=0 }
     return renderer_font(r,target_scale)
 }
 renderer_pipeline :: proc(r: ^Renderer) -> bool {
@@ -461,7 +544,7 @@ renderer_init :: proc(r: ^Renderer, width,height: int, title: cstring) -> bool {
     defer {
         // Also wait on early Vulkan failures before releasing worker-owned data.
         if font_worker!=nil {thread.destroy(font_worker)}
-        delete(atlas.pixels)
+        renderer_font_dispose(&atlas)
     }
     stage=startup_stage(stage,"GLFW / window")
     vk.load_proc_addresses_global(glfw.GetInstanceProcAddress(nil,"vkGetInstanceProcAddr"))
@@ -559,6 +642,7 @@ renderer_init :: proc(r: ^Renderer, width,height: int, title: cstring) -> bool {
     stage=startup_stage(stage,"buffers / commands")
     if font_worker!=nil {thread.join(font_worker)}
     if !atlas.ready || !renderer_font_upload(r,&atlas) { renderer_destroy(r); return false }
+    renderer_font_accept(r,&atlas)
     stage=startup_stage(stage,"font join / upload")
     if !renderer_swapchain(r) { renderer_destroy(r); return false }
     stage=startup_stage(stage,"pipeline / swapchain")
@@ -580,6 +664,9 @@ renderer_acquire_frame :: proc(r:^Renderer)->(index:u32,ready,ok:bool) {
 }
 renderer_draw :: proc(r: ^Renderer, vertices: []Vertex,image_index:u32) -> bool {
     index:=image_index
+    if r.atlas.dirty {
+        if !renderer_ok(vk.DeviceWaitIdle(r.device),"wait Unicode atlas")||!renderer_font_upload(r,&r.atlas) {return false}
+    }
     if !renderer_reserve_vertices(r,len(vertices)*size_of(Vertex)) { return false }
     capture_buffer: vk.Buffer
     capture_memory: vk.DeviceMemory
@@ -656,6 +743,7 @@ renderer_draw :: proc(r: ^Renderer, vertices: []Vertex,image_index:u32) -> bool 
     return renderer_ok(result,"present")
 }
 renderer_destroy :: proc(r: ^Renderer) {
+    renderer_font_dispose(&r.atlas)
     if r.device != nil {
         vk.DeviceWaitIdle(r.device)
         renderer_swapchain_destroy(r)

@@ -75,10 +75,17 @@ persistence_publisher_submit :: proc(publisher:^Persistence_Publisher,m:^Machine
         }
         state.history_count=count;state.history_next=count%HISTORY_CAPACITY
     } else {
-        copy(state.cpu_history[:],m.state.cpu_history[:])
-        for kind in 0..<4 {copy(state.history[kind][:],m.state.history[kind][:])}
+        // Preserve ring indices while touching only populated samples. On Linux
+        // copying unused calloc-backed slots commits the entire maximum ring.
+        first:=(m.state.history_next-m.state.history_count+HISTORY_CAPACITY)%HISTORY_CAPACITY
+        for offset in 0..<m.state.history_count {
+            slot:=(first+offset)%HISTORY_CAPACITY
+            state.cpu_history[slot]=m.state.cpu_history[slot]
+            for kind in 0..<4 {state.history[kind][slot]=m.state.history[kind][slot]}
+        }
         state.history_count=m.state.history_count;state.history_next=m.state.history_next
     }
+    history_storage_trim(state)
     metrics_display_copy(&state.metrics,&m.state.metrics)
     state.io_summary=m.state.io_summary
     sync.atomic_store(&job.cancelled,false)
@@ -142,6 +149,7 @@ persistence_publisher_worker :: proc(publisher:^Persistence_Publisher) {
         failed_name:=job.machine.name
         failed_name_len:=job.machine.name_len
         mem.free_all(context.temp_allocator)
+        if !publisher.live {platform_memory_release()}
         sync.mutex_lock(&publisher.mutex)
         publisher.inflight=nil
         cancelled:=sync.atomic_load(&job.cancelled)

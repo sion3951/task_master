@@ -23,6 +23,7 @@ Machine :: struct {
     port:u16,
     order_rank:int,
     connection:^Remote_Connection,
+    local_sampler:^Local_Sampler,
     status:Connection_Status,
     message:[512]u8, message_len:int,
     received:time.Tick,
@@ -60,6 +61,7 @@ machines_init :: proc(a:^App) {
     }
 }
 machine_free :: proc(m:^Machine) {
+    if m.local_sampler!=nil {local_sampler_destroy(m.local_sampler);m.local_sampler=nil}
     if m.connection!=nil {remote_connection_destroy(m.connection)}
     graph_freeze_release(m)
     if m.state!=nil {
@@ -77,6 +79,7 @@ machine_free :: proc(m:^Machine) {
 machines_disconnect :: proc(a:^App) {
     if a.machine_login_discovery!=nil {ssh_login_discovery_destroy(a.machine_login_discovery);a.machine_login_discovery=nil}
     for m in a.machines[:] {
+        if m.local_sampler!=nil {local_sampler_destroy(m.local_sampler);m.local_sampler=nil}
         if m.connection!=nil {remote_connection_destroy(m.connection);m.connection=nil}
     }
 }
@@ -325,16 +328,20 @@ machine_remove :: proc(a:^App,index:int) {
 machines_sample :: proc(a:^App,now:f64) {
     if a.persistence_enabled&&!persistence_headless {persistence_reader_poll(a,now)}
     selected:=a.machine;local:=a.local_machine.state
-    if !a.persistence_enabled&&!local.paused&&persistence_local_needs_prime {
-        if !local.metrics._gpu_backends_active {metrics_init_devices(&local.metrics)}
-        else {metrics_sample(&local.metrics,0)}
-        local.last_sample=now
-        persistence_local_needs_prime=false
-    }
-    if (!a.persistence_enabled||persistence_local_handoff_pending)&&!local.paused&&now-local.last_sample>=a.interval {
-        metrics_sample(&local.metrics,now-local.last_sample);local.last_sample=now;a.machine=local;history_push(a)
-        a.local_machine.has_sample=true;a.local_machine.status=.Live;a.local_machine.received=time.tick_now()
-        if selected==local {a.dirty=true}
+    local_worker:=a.local_machine.local_sampler
+    local_enabled:=persistence_headless||!a.persistence_enabled||persistence_local_handoff_pending
+    local_sampler_configure(local_worker,local_enabled,local.paused,a.interval)
+    if local_enabled&&!local.paused {
+        for {
+            sampled_ok,sampled,interval,gap:=local_sampler_take(local_worker,&local.metrics)
+            if !sampled_ok {break}
+            age:=time.duration_seconds(time.tick_since(sampled))
+            local.last_sample=now-age;a.machine=local
+            if gap {local.history_connected=false;local.history_handoff_pending=false;local.history_handoff_timestamp=0}
+            history_push(a,persistence_wall_time()-age,interval)
+            a.local_machine.has_sample=true;a.local_machine.status=.Live;a.local_machine.received=sampled
+            if selected==local {a.dirty=true}
+        }
     }
     for m,i in a.machines[:] {
         c:=m.connection
@@ -835,7 +842,10 @@ machine_key_callback :: proc "c" (window:glfw.WindowHandle,key,scancode,action,m
         if key==glfw.KEY_N&&mods&glfw.MOD_CONTROL!=0 {machine_dialog_open(a);return}
         if mods&glfw.MOD_CONTROL!=0&&key>=glfw.KEY_1&&key<=glfw.KEY_9 {machine_select(a,int(key-glfw.KEY_1));return}
         if mods&(glfw.MOD_CONTROL|glfw.MOD_ALT|glfw.MOD_SUPER)==0 {
-            if key==glfw.KEY_SPACE {a.paused=!a.paused;a.history_connected=false;a.history_handoff_pending=false;a.history_handoff_timestamp=0;a.dirty=true}
+            if key==glfw.KEY_SPACE {
+                a.paused=!a.paused;a.history_connected=false;a.history_handoff_pending=false;a.history_handoff_timestamp=0;a.dirty=true
+                if a.machine==a.local_machine.state {local_sampler_configure(a.local_machine.local_sampler,persistence_headless||!a.persistence_enabled||persistence_local_handoff_pending,a.paused,a.interval)}
+            }
             if key==glfw.KEY_F {graph_freeze_toggle(a)}
             if key>=glfw.KEY_1&&key<=glfw.KEY_4 {a.view=View(key-glfw.KEY_1);a.dirty=true}
 

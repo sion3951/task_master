@@ -69,6 +69,13 @@ throughout the UI. The font and shaders are embedded, so the resulting binary
 does not need its source directory at runtime. The font's SIL Open Font License
 is included in `assets/FONT-LICENSE.txt`.
 
+Unicode names and messages use Inter's available glyphs, with installed system
+and personal fonts as fallbacks on Linux/Windows and CoreText's native font
+cascade on macOS. Measurement, drawing and truncation use the same glyphs and
+preserve UTF-8 codepoint boundaries. Missing font coverage still displays `?`;
+install a font covering the desired script if needed. Complex-script shaping,
+bidirectional layout and colour emoji are not implemented.
+
 ## Installers and Linux packages
 
 The `Installers` GitHub Actions workflow builds **x64 and ARM64** Linux AppImages
@@ -456,7 +463,7 @@ used by other software. User preferences are retained.
 - Click the header **snowflake / Freeze** control, or press **F**, to freeze all
   graph pages and machines together. The control turns blue and the time axes
   show **Frozen**. Switch pages or machines, scroll, hover and pin readings while
-  the captured histories stay fixed. Sampling and process tables continue live;
+  the captured histories stay fixed. Sampling and unpinned process tables continue live;
   click again or press **F** for a short, eased slide into the latest history.
   Frozen traces move left as new samples enter from the right; changing axis
   scales transition with them. Catch-up lasts 0.4 seconds, including long freezes.
@@ -465,8 +472,10 @@ used by other software. User preferences are retained.
   show no frozen history until resumed.
 - Overview uses the CPU view's unboxed sections, large readouts, faint dividers,
   and smooth CPU, GPU and RAM histories. Graphics details, network and
-  storage rates, and the process table follow the same layout. Narrow windows
-  stack the sections; scroll over the summaries or headings to move the page,
+  storage rates, and the process table follow the same layout. Shorter windows
+  tighten section gaps and then shorten the graphs, keeping the process table
+  inside the window. Narrow windows stack the sections; when the sections cannot
+  fit, scroll over the summaries or headings to move the page,
   and inside the process list to browse its groups.
 - The CPU view groups SMT siblings into physical core columns with faint vertical
   dividers. Its unboxed histories and core rows expand to fill taller windows.
@@ -499,7 +508,17 @@ used by other software. User preferences are retained.
   Hover inspection and click to pin/unpin select the same moment across both
   columns. Memory, disk and network histories survive persistence reloads;
   older caches fill these graphs as new samples arrive.
-  Process breakdowns remain in Overview.
+  A process table below the histories shows live processes or the consumers
+  recorded at a pinned graph sample.
+- Click a history graph to inspect its recorded process consumers in Overview,
+  CPU, GPU or Mem+IO. Each sample retains the union of the top twelve CPU and
+  RAM groups and the top twelve GPU groups, including their measured resource
+  usage and a bounded list of PID identities. The table displays the sampled
+  time and marks incomplete PID lists. Historical rows are read-only; select
+  **Live** or unpin the graph to return to current processes and process actions.
+  These snapshots follow each machine through SSH sampling, graph freezing and
+  Persistence reloads. Older histories without process snapshots explicitly
+  show that attribution was not recorded.
 - Click **NAME**, **PIDS**, **CPU %**, **RAM** or **VRAM** in a process table to
   sort the full grouped list. Click again to reverse the order; the small arrow
   marks the active column and direction. The selected column and direction are
@@ -790,8 +809,15 @@ connection, use `./build/task_master --remote=server`; this does not save the ho
   dense graph histories, using Metal buffers on macOS and a persistent Vulkan
   buffer elsewhere. CPU vertex storage also grows with geometry; excess capacity
   is released after 120 smaller frames.
-  Font raster storage grows with the glyphs, and the texture uses its actual
-  occupied height. Glyphs and panel edges align to
+  On Linux, CPU and GPU font storage starts at 256 KiB and grows with occupied
+  rows, up to the original 8 MiB limit each. ASCII at 1.5x scale uses 1 MiB each;
+  Unicode cache eviction releases excess rows. Font coordinates stay stable
+  during growth, including glyphs added while building a frame. macOS and
+  Windows retain the 8 MiB atlases. All platforms use eager ASCII glyphs and
+  a bounded cache of 2,048 Unicode glyph/size pairs. Additional glyphs load on
+  demand; atlas uploads are combined before drawing, and cache eviction happens
+  between frames so existing geometry retains valid texture coordinates.
+  Glyphs and panel edges align to
   physical pixels; a monitor density change rebuilds the atlas once.
 - One GPU draw per frame; AppKit on macOS and GLFW elsewhere sleep between
   samples and wake for input/resize.
@@ -831,9 +857,25 @@ connection, use `./build/task_master --remote=server`; this does not save the ho
   across a fleet; atomic cache publication streams through a 16 KiB buffer.
   GPU process deduplication uses sorting and linear reductions,
   retaining maximum VRAM per PID within a GPU and summed VRAM across GPUs.
+- History publication and graph freeze copy only retained ring slots. Linux
+  returns complete inactive history pages to the kernel after pruning, cache
+  restores and snapshot copies, including smoothing and merge scratch. The
+  five-minute / 3,001-sample limit and recorded process data remain intact.
+  At polling intervals of one second or more, the graph filter is exactly the
+  identity and reads the original samples without retaining duplicate data;
+  histories containing faster samples continue using the same filter.
+  When available, Linux's allocator trim extension returns already-freed heap
+  scratch after startup and at most once every 30 seconds during background
+  cache work. Other allocators require no extension.
 - Startup prepares telemetry and rasterizes the font on two short-lived CPU
   workers while the main thread initializes the native graphics backend. Both workers finish
   before the first draw; power access is dropped before either worker starts.
+- Ongoing local telemetry runs on its own CPU worker, which owns the sampler's
+  hardware counters and GPU sensor handles. The UI consumes queued, timestamped
+  display snapshots while its GPU renders independently. Polling, pause and
+  Persistence handoffs update the worker's sampling ownership; shutdown joins
+  the worker and releases its resources. A bounded queue retains fast samples
+  during short UI delays, and any queue overflow leaves an explicit history gap.
 
 On this machine (9800X3D / RTX 5090), the release binary is approximately 2.1 MiB.
 The startup pass measured first-frame submission at 194 ms before and 171–178 ms
@@ -853,6 +895,21 @@ run exercised both full PID limits, CPU-counter growth, snapshot roundtripping,
 display copies and rejection of invalid frames. NVML unloading/reloading was
 also checked on the real GPU. PNG capture is more expensive than normal
 monitoring and is excluded from the CPU figure.
+
+The October 12 Linux memory pass compared a saved pre-change binary with the
+optimized build on the RTX 5090, using temporary settings and separate
+four-second standalone desktop and persistence runs. Persistence fell from
+85.0 to 39.3 MiB RSS (54%), from 75.3 to 29.7 MiB proportional memory, and from
+70.2 to 24.7 MiB private memory. The validated desktop readings were 267.2 and
+262.8 MiB RSS; desktop results vary with NVIDIA driver allocations and shared
+library residency, so the short runs do not establish a fixed window budget.
+The bounds-checked sanity pass covered empty, wrapped and full history rings,
+retained process data, frozen/publication copies, normal/fast graph filtering,
+font rasterization at 0.5x through 4x, Unicode atlas growth and eviction. An
+actual Vulkan capture also verified text and graphs. Reproduce measurements
+with `python3 scripts/profile-linux-memory.py ./build/task_master`; the harness
+isolates settings and service control, reports RSS/PSS/private memory, rejects
+desktop runs with no samples, and stops every process it starts.
 
 ## Automatic updates
 
@@ -896,12 +953,14 @@ permissions. A missing device or unsupported GPU sensor displays an unavailable
 state. Software rendering adapters are excluded from Windows device discovery.
 
 Files: `main.odin` (dashboard and input), `process_ui.odin` (grouped process tables),
+`process_history.odin` (sampled process attribution),
 `process_preferences.odin` (saved pins, sorting and row menus),
 `process_actions.odin` (background local and SSH PID controls),
 `cpu_ui.odin` (physical CPU graphs), `gpu_ui.odin` (GPU dashboard),
 `memory_ui.odin` (RAM, swap and disk graphs),
 `overview_ui.odin` (Overview dashboard),
 `telemetry.odin` (live system data),
+`local_sampler.odin` (background local telemetry and snapshot queue),
 `renderer.odin` (Linux/Windows Vulkan), `renderer_darwin.odin` (Metal),
 `renderer_font_darwin.odin` (CoreText/CoreGraphics),
 `desktop_window/` (AppKit on macOS, GLFW elsewhere),

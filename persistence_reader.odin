@@ -274,6 +274,7 @@ persistence_reader_worker :: proc(reader:^Persistence_Reader) {
                                         swap_total=sample.swap_total,swap_used=sample.swap_used,disk_read=sample.disk_read,disk_write=sample.disk_write,
                                         network_rx=sample.network_rx,network_tx=sample.network_tx,
                                         ram_available=sample.ram_available,rates_ready=sample.rates_ready,network_rates_ready=sample.network_rates_ready}
+                                    process_history_restore(&destination.processes,sample.processes)
                                     copy(destination.cores[:],sample.cores);copy(destination.logical[:],sample.logical)
                                     destination.gpu=gpu_cache_sample(sample,result.metrics,cache.snapshot!=""&&sample.timestamp==cache.sampled_at)
                                     history_device_cache(destination,sample)
@@ -300,6 +301,7 @@ persistence_reader_worker :: proc(reader:^Persistence_Reader) {
                     persistence_reader_publish(reader,result)
                 }
                 mem.free_all(context.temp_allocator)
+                platform_memory_release()
             }
         }
         time.sleep(10*time.Millisecond if reader.live else 50*time.Millisecond)
@@ -368,6 +370,7 @@ persistence_reader_history_apply :: proc(reader:^Persistence_Reader,state:^Machi
                     if scratch.cpu_history[destination].polling_seconds==0 {
                         scratch.cpu_history[destination].polling_seconds=state.cpu_history[matched_old_slot].polling_seconds
                     }
+                    if !scratch.cpu_history[destination].processes.recorded {scratch.cpu_history[destination].processes=state.cpu_history[matched_old_slot].processes}
                     history_memory_copy(&scratch.cpu_history[destination],&state.cpu_history[matched_old_slot])
                     history_device_copy(&scratch.cpu_history[destination],&state.cpu_history[matched_old_slot])
                 }
@@ -398,6 +401,8 @@ persistence_reader_history_apply :: proc(reader:^Persistence_Reader,state:^Machi
         if state.cpu_history[slot].timestamp==gpu_pinned {state.gpu_pinned_slot=slot}
         if state.cpu_history[slot].timestamp==memory_pinned {state.memory_pinned_slot=slot}
     }
+    history_storage_trim(state)
+    history_storage_trim_samples(scratch.cpu_history[:],state.history_count,state.history_next)
 }
 persistence_reader_poll :: proc(a:^App,now:f64) {
     persistence_reader_poll_mode(a,now,false)

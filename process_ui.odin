@@ -10,7 +10,7 @@ Process_Table_Data :: struct {
     groups: []Process_Group,
     nodes: []PID_Node,
     total: int,
-    partial, cpu_available: bool,
+    partial, cpu_available, pids_partial, memory_shared: bool,
     memory_capacity: u64,
 }
 Process_Row :: struct {
@@ -31,7 +31,7 @@ process_table_data :: proc(a:^App,gpu:bool)->Process_Table_Data {
     data:=Process_Table_Data{
         groups=m._groups[:m.total_process_groups],nodes=m.process_pids[:m._group_pid_count],
         total=m.total_processes,partial=m.process_group_overflow,
-        cpu_available=m.cpu_available,memory_capacity=m.memory_total if m.ram_available else 0,
+        cpu_available=m.cpu_available,memory_shared=m.gpu_process_memory_shared,memory_capacity=m.memory_total if m.ram_available else 0,
     }
     if gpu {
         data.groups=m._gpu_groups[:m.gpu_total_groups]
@@ -129,14 +129,15 @@ Process_Cache :: struct {
     order: Process_Order,
     pid_width, scale, content_height: f32,
     pinned_count: int,
-    valid: bool,
+    valid, historical: bool,
+    sampled_at: f64,
 }
-process_cache_matches :: proc(a:^App,gpu:bool,pid_width:f32)->bool {
+process_cache_matches :: proc(a:^App,gpu:bool,pid_width:f32,historical:bool=false,sampled_at:f64=0)->bool {
     c:=&a.process_cache
     order:=a.process_order[int(a.view)]
     return c.valid&&c.machine==a.machine&&c.revision==a.process_revision&&c.view==a.view&&c.gpu==gpu&&
         c.order.column==order.column&&c.order.ascending==order.ascending&&
-        c.pid_width==pid_width&&c.scale==a.scale
+        c.pid_width==pid_width&&c.scale==a.scale&&c.historical==historical&&c.sampled_at==sampled_at
 }
 
 process_expanded :: proc(a:^App,name:string)->bool {
@@ -216,24 +217,48 @@ process_pid_lines :: proc(a:^App,p:^Process_Group,nodes:[]PID_Node,x,y,w:f32,ren
 }
 
 process_panel :: proc(a:^App,x,y,w,h:f32,gpu:bool=false,unboxed:bool=false) {
-    // Graph inspection holds its own readings; process tables stay live.
     displayed:=a.machine
+    historical_slot:=process_history_slot(a)
+    historical:=historical_slot>=0
+    sample:^CPU_Sample
+    if historical {sample=&a.cpu_history[historical_slot]}
     a.machine=a.machines[a.active_machine].state
     defer a.machine=displayed
     if !unboxed {panel(a,x,y,w,h)}
     outer_clip:=a.clip_active
     outer_top,outer_bottom:=a.clip_top,a.clip_bottom
     defer {a.clip_active=outer_clip;a.clip_top,a.clip_bottom=outer_top,outer_bottom}
-    text(a,"GPU PROCESSES" if gpu else "PROCESSES",x+18,y+28,10,SOFT)
-    a.process_freeze_x,a.process_freeze_y=x+122,y+8
-    a.process_freeze_visible=!outer_clip||(y+8>=outer_top&&y+36<=outer_bottom)
-    if hit(a,x+122,y+8,28,28) {process_freeze_toggle(a)}
-    frozen:=a.process_frozen[int(a.view)]
-    color:=CYAN if frozen!=nil else SOFT
-    if process_freeze_hovered(a,a.mouse_x,a.mouse_y) {rounded_rect(a,x+124,y+10,24,24,5,LINE);if frozen==nil {color=TEXT}}
-    process_snowflake(a,x+136,y+22,color)
     data:=process_table_data(a,gpu)
-    right_text(a,fmt.tprintf("%d groups / %d PIDs%s",len(data.groups),data.total," (partial)" if data.partial else ""),x+w-18,y+28,10,MUTED)
+    if historical {data=process_history_data(sample,gpu)}
+    sampled_at:=sample.timestamp if sample!=nil else 0
+    frozen:^Process_Frozen_Table
+    if historical {
+        text(a,"TOP GPU GROUPS" if gpu else "TOP CPU + RAM",x+18,y+28,10,SOFT)
+        rounded_rect(a,x+122,y+8,42,28,5,LINE)
+        text(a,"Live",x+132,y+27,12,TEXT)
+        if hit(a,x+122,y+8,42,28) {
+            // Resume both the displayed graph pin and its live process actions.
+            a.machine=displayed;process_history_resume(a);a.machine=a.machines[a.active_machine].state
+            historical=false;sample=nil;sampled_at=0;data=process_table_data(a,gpu)
+        }
+        if historical {
+            age:=max(0,displayed.cpu_history[(displayed.history_next+HISTORY_CAPACITY-1)%HISTORY_CAPACITY].timestamp-sampled_at)
+            stamp:=platform_clock_text(i64(sampled_at))
+            label:=fmt.tprintf("%s / -%.1fs / read-only",stamp,age) if w>=450 else fmt.tprintf("%s / read-only",stamp)
+            fit_text(a,label,x+174,y+28,max(0,w-192),10,MUTED)
+        }
+    }
+    if !historical {
+        text(a,"GPU PROCESSES" if gpu else "PROCESSES",x+18,y+28,10,SOFT)
+        a.process_freeze_x,a.process_freeze_y=x+122,y+8
+        a.process_freeze_visible=!outer_clip||(y+8>=outer_top&&y+36<=outer_bottom)
+        if hit(a,x+122,y+8,28,28) {process_freeze_toggle(a)}
+        frozen=a.process_frozen[int(a.view)]
+        color:=CYAN if frozen!=nil else SOFT
+        if process_freeze_hovered(a,a.mouse_x,a.mouse_y) {rounded_rect(a,x+124,y+10,24,24,5,LINE);if frozen==nil {color=TEXT}}
+        process_snowflake(a,x+136,y+22,color)
+        right_text(a,fmt.tprintf("%d groups / %d PIDs%s",len(data.groups),data.total," (partial)" if data.partial else ""),x+w-18,y+28,10,MUTED)
+    }
     processes,nodes:=data.groups,data.nodes
     pid_end:=x+w-222
     pid_start:=min(x+18+(w-36)*0.32,pid_end-52)
@@ -245,11 +270,11 @@ process_panel :: proc(a:^App,x,y,w,h:f32,gpu:bool=false,unboxed:bool=false) {
     order:=a.process_order[int(a.view)]
     text(a,"NAME",x+18,y+59,12,TEXT if order.column==.Name else MUTED)
     if order.column==.Name {process_chevron(a,x+66,y+55,order.ascending,SOFT)}
-    process_sort_label(a,"PIDS",pid_end,y+59,.PIDs)
+    process_sort_label(a,"PIDS subset" if historical&&data.pids_partial else "PIDS",pid_end,y+59,.PIDs)
     process_sort_label(a,"CPU %",x+w-144,y+59,.CPU)
-    process_sort_label(a,("GPU RAM" if a.metrics.gpu_process_memory_shared else "VRAM") if gpu else "RAM",x+w-18,y+59,.Memory)
+    process_sort_label(a,("GPU RAM" if data.memory_shared else "VRAM") if gpu else "RAM",x+w-18,y+59,.Memory)
     rect(a,x+18,y+70,w-36,1,LINE)
-    if !process_cache_matches(a,gpu,pid_width) {
+    if !process_cache_matches(a,gpu,pid_width,historical,sampled_at) {
         hold_layout:=frozen!=nil&&!frozen.reset&&frozen.pid_width==pid_width&&frozen.scale==a.scale
         if frozen!=nil&&frozen.reset {process_frozen_clear(frozen)}
         clear(&a.process_rows)
@@ -314,7 +339,7 @@ process_panel :: proc(a:^App,x,y,w,h:f32,gpu:bool=false,unboxed:bool=false) {
         }
         a.process_cache=Process_Cache{machine=a.machine,revision=a.process_revision,view=a.view,gpu=gpu,
             order=order,pid_width=pid_width,scale=a.scale,
-            content_height=content_height,pinned_count=pinned_count,valid=true}
+            content_height=content_height,pinned_count=pinned_count,valid=true,historical=historical,sampled_at=sampled_at}
     }
     rows:=a.process_rows[:]
     a.table_x,a.table_y,a.table_w,a.table_h=x,y+73,w,h-73
@@ -332,7 +357,8 @@ process_panel :: proc(a:^App,x,y,w,h:f32,gpu:bool=false,unboxed:bool=false) {
     a.clip_active=true
     if len(rows)==0 {
         message:="No processes reported" if gpu else "Waiting for first sample"
-        text(a,message,x+18,y+101,12,MUTED)
+        if historical {message="No GPU processes recorded" if gpu else "No processes recorded";if !sample.processes.recorded {message="Process history unavailable for this sample"}}
+        fit_text(a,message,x+18,y+101,w-36,12,MUTED)
     }
     row_y:=y+94-a.process_scroll[view_index]
     memory_capacity:=data.memory_capacity
@@ -367,7 +393,7 @@ process_panel :: proc(a:^App,x,y,w,h:f32,gpu:bool=false,unboxed:bool=false) {
                 process_chevron(a,pid_end-5,row_y-4,row.expanded)
                 if a.mouse_y>=a.clip_top&&a.mouse_y<a.clip_bottom&&hit(a,pid_end-18,row_y-16,18,24) {process_toggle(a,name);a.click=false}
             }
-            if a.click&&a.mouse_x>=x+18&&a.mouse_x<x+w-18&&a.mouse_y>=max(a.clip_top,row_y-16)&&a.mouse_y<min(a.clip_bottom,row_y+row.height-16) {
+            if !historical&&a.click&&a.mouse_x>=x+18&&a.mouse_x<x+w-18&&a.mouse_y>=max(a.clip_top,row_y-16)&&a.mouse_y<min(a.clip_bottom,row_y+row.height-16) {
                 process_menu_open_row(a,p,nodes)
             }
             if i<len(rows)-1&&i+1!=a.process_cache.pinned_count {rect(a,x+18,row_y+row.height-20,w-36,1,Color{0.08,0.08,0.08,1})}

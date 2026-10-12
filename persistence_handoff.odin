@@ -13,7 +13,7 @@ persistence_local_startup :: proc(a: ^App) {
     local := a.local_machine
     local.has_sample = true
     local.status = .Live
-    local.received = a.metrics._sample_started
+    local.received = local.state.metrics._sample_started
 }
 
 persistence_local_handoff_start :: proc(a: ^App) {
@@ -27,7 +27,8 @@ persistence_local_handoff_start :: proc(a: ^App) {
     }
     persistence_local_handoff_pending = true
     persistence_local_handoff_completed_at = 0
-    persistence_local_handoff_after = persistence_wall_time()-time.duration_seconds(time.tick_since(local.metrics._sample_started))
+    persistence_local_handoff_after = persistence_wall_time()-time.duration_seconds(time.tick_since(a.local_machine.received))
+    local_sampler_configure(a.local_machine.local_sampler,true,local.paused,a.interval)
 }
 
 persistence_local_snapshot_ready :: proc(a: ^App, m: ^Machine, result: ^Persistence_Read_Result) -> bool {
@@ -44,7 +45,7 @@ persistence_local_snapshot_ready :: proc(a: ^App, m: ^Machine, result: ^Persiste
     persistence_local_handoff_pending = false
     persistence_local_handoff_completed_at = result.sampled_at
     m.state.history_handoff_pending = false
-    metrics_suspend_devices(&m.state.metrics)
+    local_sampler_configure(m.local_sampler,false,m.state.paused,a.interval)
     if startup_profile {
         fmt.printf("Persistence local handoff: %.0f ms | %d GPUs\n",(wall-persistence_local_handoff_after)*1000,result.metrics.gpu_count)
     }

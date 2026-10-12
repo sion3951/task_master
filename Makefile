@@ -8,6 +8,8 @@ PACKAGE_VERSION ?= $(shell cat VERSION)
 ODIN_VERSION_FLAGS := -define:TASK_MASTER_VERSION=$(PACKAGE_VERSION)
 TELEMETRY_SOURCES := $(wildcard telemetry*.odin)
 COLLECTOR_SOURCES := $(wildcard collector/*.odin)
+UPDATE_HELPER_SOURCES := $(wildcard updater_helper/*.odin)
+UPDATE_SECURITY_SOURCES := $(wildcard updater_security/*.odin)
 # Each desktop embeds only its native collector; remote helpers are fetched on demand.
 NATIVE_PAYLOAD_OS := $(shell uname -s | tr A-Z a-z)
 ifeq ($(NATIVE_PAYLOAD_OS),darwin)
@@ -17,9 +19,9 @@ else
 GRAPHICS_SOURCES := shaders/ui.vert.spv shaders/ui.frag.spv
 endif
 WINDOW_SOURCES := $(wildcard desktop_window/*.odin)
-.PHONY: all run clean check collector collectors windows-check macos-check macos release install install-remote appimage deb packages packages-development
+.PHONY: all run clean check collector update-helper collectors windows-check macos-check macos release install install-remote appimage deb packages packages-development
 export HOST
-all: build/task_master build/task_master-collector
+all: build/task_master build/task_master-collector build/task_master-update-helper
 
 shaders/ui.vert.spv: shaders/ui.vert
 	$(GLSLC) $(GLSLC_FLAGS) $< -o $@
@@ -27,7 +29,7 @@ shaders/ui.vert.spv: shaders/ui.vert
 shaders/ui.frag.spv: shaders/ui.frag
 	$(GLSLC) $(GLSLC_FLAGS) $< -o $@
 
-build/task_master: $(wildcard *.odin) $(WINDOW_SOURCES) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/update-download-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist $(GRAPHICS_SOURCES) assets/Inter-Regular.ttf build/task_master-collector
+build/task_master: $(wildcard *.odin) $(WINDOW_SOURCES) $(UPDATE_SECURITY_SOURCES) VERSION assets/update-public-key.hex scripts/update-install-unix.sh scripts/update-install-windows.ps1 scripts/update-download-windows.ps1 scripts/remote-setup.sh scripts/remote-setup.ps1 scripts/install-system.sh scripts/install-remote-unix.sh scripts/install-remote-windows.ps1 scripts/install-sensors.ps1 sensors/macos/task_master-sensors.sh sensors/macos/sensors.plist $(GRAPHICS_SOURCES) assets/Inter-Regular.ttf build/task_master-collector
 	mkdir -p build
 	$(ODIN) build . -out:$@ -o:speed -no-bounds-check -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(ODIN_NATIVE_FLAGS)
 
@@ -39,6 +41,13 @@ build/task_master-collector: $(TELEMETRY_SOURCES) remote_protocol.odin $(COLLECT
 	$(ODIN) build build/collector-src -out:$@ -o:speed -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(ODIN_NATIVE_FLAGS)
 
 collector: build/task_master-collector
+
+# This protected installer verifies signed metadata again after elevation.
+build/task_master-update-helper: $(UPDATE_HELPER_SOURCES) $(UPDATE_SECURITY_SOURCES) VERSION assets/update-public-key.hex scripts/update-install-root.sh
+	mkdir -p build
+	$(ODIN) build updater_helper -out:$@ -o:speed -vet $(ODIN_MEMORY_FLAGS) $(ODIN_VERSION_FLAGS) $(ODIN_NATIVE_FLAGS)
+
+update-helper: build/task_master-update-helper
 
 # Build or import separately published remote collector assets when requested.
 collectors:

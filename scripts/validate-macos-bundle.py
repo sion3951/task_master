@@ -36,7 +36,7 @@ def main():
     if len(sys.argv) != 3 or sys.argv[2] not in ("x86_64", "arm64"):
         raise SystemExit("Usage: validate-macos-bundle.py APP_BUNDLE x86_64|arm64")
     bundle = pathlib.Path(sys.argv[1])
-    for executable in ("task_master", "task_master-collector"):
+    for executable in ("task_master", "task_master-collector", "task_master-update-helper"):
         validate_binary(bundle / "Contents/MacOS" / executable, sys.argv[2])
 
 

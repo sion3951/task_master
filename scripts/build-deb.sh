@@ -36,10 +36,10 @@ for tool in dpkg dpkg-deb dpkg-shlibdeps python3 patchelf strip; do
     }
 done
 dpkg --validate-version "$version"
-for binary in task_master task_master-collector; do
+for binary in task_master task_master-collector task_master-update-helper; do
     [ -x "$build_dir/$binary" ] || { echo "Build $build_dir/$binary before packaging." >&2; exit 1; }
 done
-architecture=$(python3 - "$build_dir/task_master" "$build_dir/task_master-collector" <<'PY'
+architecture=$(python3 - "$build_dir/task_master" "$build_dir/task_master-collector" "$build_dir/task_master-update-helper" <<'PY'
 import pathlib, struct, sys
 architectures = {62: 'amd64', 183: 'arm64', 243: 'riscv64'}
 def architecture(filename):
@@ -50,10 +50,10 @@ def architecture(filename):
     if machine not in architectures:
         raise SystemExit(f'{filename}: unsupported Debian package architecture {machine}')
     return architectures[machine]
-first, second = map(architecture, sys.argv[1:])
-if first != second:
-    raise SystemExit('Desktop and collector architectures must match')
-print(first)
+values = list(map(architecture, sys.argv[1:]))
+if len(set(values)) != 1:
+    raise SystemExit('Desktop, collector and update-helper architectures must match')
+print(values[0])
 PY
 )
 [ "$architecture" = "$(dpkg --print-architecture)" ] || {
@@ -72,9 +72,14 @@ mkdir -p "$stage/DEBIAN" "$stage/usr/bin" "$stage/usr/libexec/task_master" \
 python3 scripts/bundle-linux-libraries.py "$build_dir/task_master" \
     "$stage/usr/bin/task_master" "$stage/usr/lib/task_master" --only libglfw.so.3
 install -m 755 "$build_dir/task_master-collector" "$stage/usr/libexec/task_master/collector"
+install -m 755 "$build_dir/task_master-update-helper" "$stage/usr/libexec/task_master/update-helper"
+install -m 755 scripts/update-install-unix.sh "$stage/usr/libexec/task_master/update-install.sh"
 # A capability-bearing executable must resolve only trusted system libraries.
 patchelf --remove-rpath "$stage/usr/libexec/task_master/collector"
+patchelf --remove-rpath "$stage/usr/libexec/task_master/update-helper"
+python3 scripts/validate-update-helper.py "$stage/usr/libexec/task_master/update-helper"
 strip --strip-unneeded "$stage/usr/bin/task_master" "$stage/usr/libexec/task_master/collector" \
+    "$stage/usr/libexec/task_master/update-helper" \
     "$stage/usr/lib/task_master/libglfw.so.3"
 install -m 644 assets/linux/task_master.desktop "$stage/usr/share/applications/task_master.desktop"
 install -m 644 assets/linux/task_master.svg "$stage/usr/share/icons/hicolor/scalable/apps/task_master.svg"
@@ -91,6 +96,7 @@ printf 'libglfw 3 task-master\n' > "$work/debian/shlibs.local"
 dependencies=$(cd "$work" && dpkg-shlibdeps -O -xtask-master \
     -ldebian/task-master/usr/lib/task_master -Sdebian/task-master \
     debian/task-master/usr/bin/task_master debian/task-master/usr/libexec/task_master/collector \
+    debian/task-master/usr/libexec/task_master/update-helper \
     debian/task-master/usr/lib/task_master/libglfw.so.3)
 dependencies=$(printf '%s\n' "$dependencies" | sed -n 's/^shlibs:Depends=//p')
 [ -n "$dependencies" ] || { echo 'dpkg-shlibdeps produced no shared-library dependencies.' >&2; exit 1; }

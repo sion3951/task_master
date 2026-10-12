@@ -32,7 +32,10 @@ void main(){
         float distance = length(frag_uv-nearest)-frag_stroke.x;
         coverage = clamp(0.5-distance,0.0,1.0);
     } else {
-        coverage = texture(atlas,frag_uv).r;
+        // Glyph UVs keep a fixed 4096-row basis even if the atlas grows while
+        // this frame is built. The uploaded texture contains only used rows.
+        vec2 atlas_uv = frag_uv * vec2(1.0,4096.0/float(textureSize(atlas,0).y));
+        coverage = texture(atlas,atlas_uv).r;
     }
     output_color = vec4(frag_color.rgb,frag_color.a*coverage);
 }

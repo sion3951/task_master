@@ -42,6 +42,7 @@ CPU_Core_Sample :: struct {
     frequency_available: bool,
 }
 CPU_Sample :: struct {
+    processes: Process_Snapshot,
     generation: u64,
     timestamp: f64,
     polling_seconds: f64,
@@ -224,12 +225,11 @@ fit_text :: proc(a:^App,s:string,x,y,w,size:f32,c:Color=TEXT) {
     // Measure the prefix once, keeping UTF-8 codepoints intact.
     font:=renderer_font_size(&a.renderer,max(size,12)*a.scale)
     width:=f32(0)
+    ellipsis_width:=renderer_text_width(&a.renderer,"...",max(size,12)*a.scale)
     n:=len(s)
     for ch,index in s {
-        c:=ch
-        if c<32||c>126 {c='?'}
-        width+=font.glyphs[c-32].advance
-        if width>(w-16)*a.scale {n=index;break}
+        width+=renderer_glyph(&a.renderer,font,ch).advance
+        if width>w*a.scale-ellipsis_width {n=index;break}
     }
     text(a,fmt.tprintf("%s...",s[:n]),x,y,size,c)
 }
@@ -472,7 +472,8 @@ history_memory_copy :: proc(destination,source:^CPU_Sample) {
     }
 }
 
-history_push :: proc(a:^App,timestamp:f64=0) {
+history_push :: proc(a:^App,timestamp:f64=0,polling_seconds:f64=0) {
+    interval:=polling_seconds if polling_seconds>0 else a.interval
     a.process_revision+=1
     m:=&a.metrics
     slot:=a.history_next
@@ -486,14 +487,14 @@ history_push :: proc(a:^App,timestamp:f64=0) {
     if a.history_handoff_pending {
         if a.history_count>0 {
             previous:=&a.cpu_history[(slot+HISTORY_CAPACITY-1)%HISTORY_CAPACITY]
-            gap_before=!history_handoff_contiguous(previous.timestamp,sampled_at,previous.polling_seconds,a.interval)
+            gap_before=!history_handoff_contiguous(previous.timestamp,sampled_at,previous.polling_seconds,interval)
         } else {
             // The asynchronous cache may supply this sample's predecessor later.
             a.history_handoff_timestamp=sampled_at
         }
         a.history_handoff_pending=false
     }
-    sample^=CPU_Sample{generation=m.cpu_topology_generation,timestamp=sampled_at,polling_seconds=a.interval,
+    sample^=CPU_Sample{generation=m.cpu_topology_generation,timestamp=sampled_at,polling_seconds=interval,
         continuity_recorded=true,gap_before=gap_before,
         lower=m.cpu_busy_lower,upper=m.cpu_busy_upper,threads=m.cpu_percent,
         power_watts=m.cpu_power_watts,frequency_mhz=m.cpu_frequency_mhz,
@@ -507,6 +508,7 @@ history_push :: proc(a:^App,timestamp:f64=0) {
         ram_available=m.ram_available,rates_ready=m.rates_ready,network_rates_ready=m.rates_ready,
         logical=m.cores}
     a.history_connected=true
+    process_history_sample(sample,m)
     sample.gpu=gpu_sample(&m.gpus[0],m.gpu_count>0)
     history_device_sample(sample,m)
     for core,i in m.physical_cores[:m.physical_core_count] {
@@ -531,6 +533,7 @@ history_push :: proc(a:^App,timestamp:f64=0) {
         if a.memory_pinned_slot==first {a.memory_pinned_slot=-1}
         a.history_count-=1
     }
+    if a.history_next%32==0 {history_storage_trim(a.machine)}
 }
 
 navigation :: proc(a:^App)->f32 {
@@ -611,7 +614,7 @@ header :: proc(a:^App) {
         title:=titles[int(a.view)]
         font:=renderer_font_size(&a.renderer,24*a.scale)
         top:=f32(0)
-        for ch in title {top=max(top,f32(font.glyphs[ch-32].top))}
+        for ch in title {top=max(top,f32(renderer_glyph(&a.renderer,font,ch).top))}
         // Match the visible title's top to the side margin at every DPI.
         text(a,title,a.content_x,a.content_x+top/a.scale,24)
         selector_x+=title_width+26
@@ -792,16 +795,16 @@ scroll_callback :: proc "c" (window:glfw.WindowHandle,xoffset,yoffset:f64) {
     }
     x,y:=glfw.GetCursorPos(window)
     x,y=window_ui_position(a,x,y)
-    if a.view==.GPU&&f32(x)>=a.content_x&&f32(x)<a.width-a.content_x&&f32(y)>=72&&f32(y)<a.height-a.content_x {
+    if a.view!=.Overview&&f32(x)>=a.content_x&&f32(x)<a.width-a.content_x&&f32(y)>=72&&f32(y)<a.height-a.content_x {
         in_table:=f32(x)>=a.table_x&&f32(x)<a.table_x+a.table_w&&f32(y)>=a.table_y&&f32(y)<a.table_y+a.table_h
         if in_table {a.process_scroll[int(a.view)]-=f32(yoffset)*36}
+        else if a.view==.CPU {a.cpu_scroll-=f32(yoffset)*36}
+        else if a.view==.Memory {a.memory_scroll-=f32(yoffset)*36}
         else {a.gpu_scroll-=f32(yoffset)*36}
         a.dirty=true;return
     }
     if f32(x)>=a.table_x&&f32(x)<a.table_x+a.table_w&&f32(y)>=a.table_y&&f32(y)<a.table_y+a.table_h {
-        if a.view==.CPU {a.cpu_scroll-=f32(yoffset)*36}
-        else if a.view==.Memory {a.memory_scroll-=f32(yoffset)*36}
-        else {a.process_scroll[int(a.view)]-=f32(yoffset)*36}
+        a.process_scroll[int(a.view)]-=f32(yoffset)*36
         a.dirty=true
     } else if a.view==.Overview&&f32(y)>=72&&f32(y)<a.height-a.content_x {
         a.overview_scroll-=f32(yoffset)*36
@@ -824,7 +827,6 @@ cursor_callback :: proc "c" (window:glfw.WindowHandle,x,y:f64) {
     if process_freeze_hovered(a,f32(ui_x),f32(ui_y))||process_freeze_hovered(a,a.mouse_x,a.mouse_y) {a.dirty=true}
     if graph_freeze_hovered(a,f32(ui_x),f32(ui_y))||graph_freeze_hovered(a,a.mouse_x,a.mouse_y) {a.dirty=true}
     if a.process_menu_open {a.mouse_x,a.mouse_y=f32(ui_x),f32(ui_y);a.dirty=true}
-    if a.view!=.CPU&&a.view!=.GPU&&a.view!=.Memory {return}
     gx,gy,gw,gh:=a.cpu_graph_x,a.cpu_graph_y,a.cpu_graph_w,a.cpu_graph_h
     was_inside:=a.mouse_x>=gx&&a.mouse_x<=gx+gw&&a.mouse_y>=gy&&a.mouse_y<=gy+gh
     inside:=f32(ui_x)>=gx&&f32(ui_x)<=gx+gw&&f32(ui_y)>=gy&&f32(ui_y)<=gy+gh
@@ -962,6 +964,7 @@ main :: proc() {
     // time in the first rate interval instead of overstating CPU and I/O rates.
     a.last_sample=a.started-time.duration_seconds(time.tick_since(a.metrics._sample_started))
     persistence_local_startup(a)
+    if !local_sampler_start(a) {fmt.eprintln("Could not start the local telemetry worker.");return}
     if a.persistence_enabled {
         persistence_reader_start(a)
         _=persistence_change_start(a,refresh=true)
@@ -973,6 +976,8 @@ main :: proc() {
     stage=startup_stage(stage,"first draw")
     glfw.ShowWindow(a.renderer.window)
     stage=startup_stage(stage,"show window")
+    free_all(context.temp_allocator)
+    platform_memory_release(force=true)
     fmt.printf("First frame: %.0f ms | %s: %s | %d GPUs\n",time.duration_seconds(time.tick_since(boot))*1000,renderer_backend_name(),a.renderer.device_name,a.metrics.gpu_count)
     for !glfw.WindowShouldClose(a.renderer.window) {
         now:=glfw.GetTime()
@@ -1004,11 +1009,9 @@ main :: proc() {
             if a.click {a.click=false;draw(a)}
         }
         a.click=false
-        // GLFW blocks between samples; input wakes it immediately.
-        local:=a.local_machine.state
-        wait:=max(0.01,a.interval-(glfw.GetTime()-local.last_sample))
-        if local.paused||a.persistence_enabled {wait=min(1,a.interval)}
-        if a.machine_count>1 {wait=min(wait,1)}
+        // Sampling workers wake GLFW after publishing; input also wakes it
+        // immediately. Do not spin while a hardware query is still running.
+        wait:=f64(1)
         if a.graphs_catching_up||a.graph_readout.active {wait=min(wait,1.0/120)}
         // Wake at the next wall-clock second even when sampling is paused.
         wall_ns:=time.to_unix_nanoseconds(time.now())

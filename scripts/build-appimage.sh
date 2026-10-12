@@ -21,7 +21,9 @@ case "$version" in *[!0-9A-Za-z.+~\-]*) echo 'Invalid version.' >&2; exit 2 ;; e
 [ "$(uname -s)" = Linux ] || { echo 'Build AppImages on Linux.' >&2; exit 1; }
 case "$(uname -m)" in x86_64) arch=x86_64 ;; aarch64|arm64) arch=aarch64 ;; *) echo 'AppImage builds support x64 and ARM64.' >&2; exit 1 ;; esac
 for tool in python3 patchelf curl strip; do command -v "$tool" >/dev/null 2>&1 || { echo "Missing $tool" >&2; exit 1; }; done
-[ -x "$build_dir/task_master" ] && [ -x "$build_dir/task_master-collector" ] || { echo 'Build the native desktop and collector first.' >&2; exit 1; }
+for binary in task_master task_master-collector task_master-update-helper; do
+    [ -x "$build_dir/$binary" ] || { echo "Build $build_dir/$binary before packaging." >&2; exit 1; }
+done
 mkdir -p "$build_dir" "$output_dir"
 work=$(mktemp -d "$build_dir/.appimage-stage-XXXXXX")
 work=$(CDPATH= cd -- "$work" && pwd)
@@ -38,11 +40,15 @@ python3 scripts/bundle-libdecor.py "$appdir/usr/lib/task_master"
 python3 scripts/bundle-linux-data.py "$appdir"
 python3 scripts/collect-linux-licenses.py "$appdir/usr/lib/task_master" "$appdir/usr/share/doc/task_master/licenses"
 install -m 755 "$build_dir/task_master-collector" "$appdir/usr/libexec/task_master/collector"
+install -m 755 "$build_dir/task_master-update-helper" "$appdir/usr/libexec/task_master/update-helper"
+install -m 755 scripts/update-install-unix.sh "$appdir/usr/libexec/task_master/update-install.sh"
 patchelf --remove-rpath "$appdir/usr/libexec/task_master/collector"
+patchelf --remove-rpath "$appdir/usr/libexec/task_master/update-helper"
+python3 scripts/validate-update-helper.py "$appdir/usr/libexec/task_master/update-helper"
 # Strip staged copies only; leave local development binaries intact. Dynamic
 # symbols used by dlopen/dlsym are retained, including both display backends.
 find "$appdir/usr/bin" "$appdir/usr/libexec" "$appdir/usr/lib/task_master" -type f \
-    \( -name task_master -o -name collector -o -name curl -o -name '*.so*' \) \
+    \( -name task_master -o -name collector -o -name update-helper -o -name curl -o -name '*.so*' \) \
     -exec strip --strip-unneeded {} +
 install -m 755 packaging/linux/AppRun "$appdir/AppRun"
 install -m 644 assets/linux/task_master.desktop "$appdir/usr/share/applications/task_master.desktop"

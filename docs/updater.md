@@ -54,6 +54,27 @@ task_master --check-updates
 It does not install the package; its temporary download is cleaned up on exit.
 System-wide installations request administrator authorization through the
 platform's normal installer or elevation prompt.
+Linux and macOS packages install a protected orchestration script and native
+update helper owned by root and unwritable by ordinary accounts. Debian places
+them in `/usr/libexec/task_master`; system AppImage installs use
+`/usr/local/libexec/task_master`; macOS uses
+`/Library/PrivilegedHelperTools/task_master`. The app checks the installed helper
+and script, including their directory ancestors, before launching an update.
+It does not elevate executable scripts copied into the user's update cache.
+
+After elevation, the native helper independently reads and verifies the signed
+manifest and signature using Ed25519 against its embedded public key, selects
+the signed asset matching this system
+and package format, rejects the installed version and older versions, then
+copies the package into private root-owned staging and checks the copied
+installer's signed size and SHA-256 before installation.
+The privileged installation instructions are embedded in the helper rather
+than loaded from the download cache. Packaged helpers link only trusted system
+libraries; they do not load an AppImage's private libraries while elevated.
+Replacing a portable AppImage remains an ordinary-user operation.
+
+An installation made before these protected helpers existed requires one manual
+installation of a current release package before it can use this update flow.
 Development builds and manual installations cannot automatically determine
 their package format; install a release package to enable the updater.
 

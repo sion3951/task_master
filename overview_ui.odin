@@ -17,27 +17,29 @@ overview_plot :: proc(a:^App,kind:int,x,y,w,h:f32,render_pass:Graph_Pass=.All) {
         return
     }
     smoothed:=graph_smoothing_prepare(a)
+    values:=&smoothed.history
+    if smoothed.identity {values=&a.history}
     first:=(a.history_next-a.history_count+HISTORY_CAPACITY)%HISTORY_CAPACITY
     for i in 1..<a.history_count {
         prev,next:=(first+i-1)%HISTORY_CAPACITY,(first+i)%HISTORY_CAPACITY
         p0,p1:=history_position(a,prev),history_position(a,next)
         dt:=f32(a.cpu_history[next].timestamp-a.cpu_history[prev].timestamp)
         if p1<=0||p1<=p0||!history_segment_contiguous(&a.cpu_history[prev],&a.cpu_history[next]) {continue}
-        v0,v1:=smoothed.history[kind][prev],smoothed.history[kind][next]
+        v0,v1:=values[kind][prev],values[kind][next]
         slope:=(v1-v0)/dt
         m0,m1:=slope,slope
         if i>1 {
             before:=(first+i-2)%HISTORY_CAPACITY
             before_dt:=f32(a.cpu_history[prev].timestamp-a.cpu_history[before].timestamp)
             if history_segment_contiguous(&a.cpu_history[before],&a.cpu_history[prev]) {
-                m0=cpu_curve_slope((v0-smoothed.history[kind][before])/before_dt,slope,before_dt,dt)
+                m0=cpu_curve_slope((v0-values[kind][before])/before_dt,slope,before_dt,dt)
             }
         }
         if i+1<a.history_count {
             after:=(first+i+1)%HISTORY_CAPACITY
             after_dt:=f32(a.cpu_history[after].timestamp-a.cpu_history[next].timestamp)
             if history_segment_contiguous(&a.cpu_history[next],&a.cpu_history[after]) {
-                m1=cpu_curve_slope(slope,(smoothed.history[kind][after]-v1)/after_dt,dt,after_dt)
+                m1=cpu_curve_slope(slope,(values[kind][after]-v1)/after_dt,dt,after_dt)
             }
         }
         curve:=[4]f32{v0,v1,m0*dt,m1*dt}
@@ -60,15 +62,36 @@ overview_plot :: proc(a:^App,kind:int,x,y,w,h:f32,render_pass:Graph_Pass=.All) {
 }
 
 overview_summary :: proc(a:^App,kind:int,label,detail:string,value:f32,available:bool,x,y,w,h:f32) {
-    fit_text(a,label,x,y+27,w,12,MUTED)
-    tint:=utilization_color(value) if available else TEXT
-    fit_text(a,fmt.tprintf("%.1f%%",value) if available else "--",x,y+61,w,27,tint)
-    fit_text(a,detail,x,y+86,w,12,MUTED)
+    current_value,current_available,current_detail:=value,available,detail
     gx,gy,gw,gh:=x+36,y+122,w-36,h-148
+    in_plot:=a.mouse_x>=gx&&a.mouse_x<=gx+gw&&a.mouse_y>=gy&&a.mouse_y<=gy+gh&&a.mouse_y>=a.clip_top&&a.mouse_y<=a.clip_bottom
+    hover_slot:=process_history_nearest(a,clamp((a.mouse_x-gx)/gw,0,1)) if in_plot else -1
+    if a.cpu_pinned_slot>=0&&history_position(a,a.cpu_pinned_slot)<0 {a.cpu_pinned_slot=-1}
+    slot:=a.cpu_pinned_slot if a.cpu_pinned_slot>=0 else hover_slot
+    if slot>=0 {
+        sample:=&a.cpu_history[slot]
+        switch kind {
+        case 0: current_value=sample.threads;current_available=sample.processes.cpu_available if sample.processes.recorded else available
+        case 1: current_value=sample.gpu.utilization;current_available=sample.gpu.utilization_available
+        case 2: current_value=memory_pct(sample.memory_used,sample.memory_total);current_available=sample.ram_available
+            current_detail=fmt.tprintf("%s used / %s",bytes_label(sample.memory_used),bytes_label(sample.memory_total))
+        }
+    }
+    fit_text(a,label,x,y+27,w,12,MUTED)
+    tint:=utilization_color(current_value) if current_available else TEXT
+    fit_text(a,fmt.tprintf("%.1f%%",current_value) if current_available else "--",x,y+61,w,27,tint)
+    fit_text(a,current_detail,x,y+86,w,12,MUTED)
     cpu_grid(a,gx,gy,gw,gh,100,.Busy,label_x=x)
     if available {overview_plot(a,kind,gx,gy,gw,gh)}
     text(a,graph_time_axis_label(a),x,gy+gh+22,12,MUTED)
     right_text(a,history_end_label(a),gx+gw,gy+gh+22,12,MUTED)
+    if slot>=0 {
+        cursor_x:=gx+gw*history_position(a,slot)
+        stroke(a,cursor_x,gy,cursor_x,gy+gh,1,MUTED)
+        if (a.cpu_pinned_slot>=0&&a.cpu_pinned_graph==kind)||hover_slot>=0 {
+            history_time_label(a,slot,a.cpu_pinned_slot>=0,cursor_x,gx,gy,gw,gh)
+        }
+    }
 }
 
 overview_graphics :: proc(a:^App,x,y,w:f32) {
@@ -117,12 +140,22 @@ overview :: proc(a:^App) {
     details_h:=f32(342) if compact else f32(164)
     controls_h:=graph_controls_height(w-36)+8
     viewport_top,viewport_bottom:=f32(72),a.height-a.content_x
-    // Share spare height with the histories and process list; stack and scroll
-    // on small windows so every section stays reachable.
-    minimum_h:=f32(3/cols)*summary_h+controls_h+28+details_h+20+180
-    spare:=max(0,viewport_bottom-viewport_top-minimum_h)
-    summary_h+=spare*0.25
-    process_y:=viewport_top+f32(3/cols)*summary_h+controls_h+28+details_h+20
+    rows:=f32(3/cols)
+    details_gap,process_gap:=f32(28),f32(20)
+    viewport_h:=viewport_bottom-viewport_top
+    // Tighten section gaps first, then shorten the histories to a readable
+    // 56-pixel plot. Keep room for the process headings and three rows before
+    // falling back to whole-page scrolling on genuinely small windows.
+    minimum_h:=rows*summary_h+controls_h+details_gap+details_h+process_gap+180
+    shortfall:=max(0,minimum_h-viewport_h)
+    gap_reduction:=min(shortfall,24)
+    details_gap-=gap_reduction/2
+    process_gap-=gap_reduction/2
+    summary_h-=min(24,(shortfall-gap_reduction)/rows)
+    minimum_h=rows*summary_h+controls_h+details_gap+details_h+process_gap+180
+    spare:=max(0,viewport_h-minimum_h)
+    summary_h+=spare*0.25/rows
+    process_y:=viewport_top+rows*summary_h+controls_h+details_gap+details_h+process_gap
     process_h:=max(180,viewport_bottom-process_y)
     content_bottom:=process_y+process_h
     max_scroll:=max(0,content_bottom-viewport_bottom)
@@ -137,13 +170,29 @@ overview :: proc(a:^App) {
     details:=[3]string{fmt.tprintf("%d threads / %s %.2f",m.cpu_count,"queue average" if m.platform=="windows" else "load",m.load[0]),string(g.name[:g.name_len]) if m.gpu_count>0 else "GPU device unavailable",fmt.tprintf("%s used / %s",bytes_label(m.memory_used),bytes_label(m.memory_total))}
     values:=[3]f32{m.cpu_percent,g.utilization,memory_pct(m.memory_used,m.memory_total)}
     available:=[3]bool{m.cpu_available&&a.history_count>0,m.gpu_count>0&&g.utilization_available,m.ram_available}
+    a.cpu_graph_x,a.cpu_graph_y,a.cpu_graph_w,a.cpu_graph_h=x,viewport_top-offset,w,rows*summary_h
+    // Resolve a click before drawing summaries so every panel and attribution
+    // table uses the same pinned timestamp in this frame.
+    if a.click {
+        for kind in 0..<3 {
+            sx,sy:=x+f32(kind%cols)*(cw+gap),viewport_top+f32(kind/cols)*summary_h-offset
+            gx,gy,gw,gh:=sx+36,sy+122,cw-36,summary_h-148
+            in_plot:=a.mouse_x>=gx&&a.mouse_x<=gx+gw&&a.mouse_y>=gy&&a.mouse_y<=gy+gh&&a.mouse_y>=viewport_top&&a.mouse_y<=viewport_bottom
+            if in_plot {
+                if a.cpu_pinned_slot>=0 {a.cpu_pinned_slot=-1}
+                else {a.cpu_pinned_slot=process_history_nearest(a,clamp((a.mouse_x-gx)/gw,0,1));a.cpu_pinned_graph=kind}
+                a.click=false
+                break
+            }
+        }
+    }
     for label,i in labels {
         cx,cy:=x+f32(i%cols)*(cw+gap),viewport_top+f32(i/cols)*summary_h-offset
         overview_summary(a,i,label,details[i],values[i],available[i],cx,cy,cw,summary_h)
         if !compact&&i>0 {rect(a,cx-gap/2,viewport_top-offset,1,summary_h-4,LINE)}
     }
-    graph_controls_draw(a,x+36,viewport_top+f32(3/cols)*summary_h+8-offset,w-36)
-    details_y:=viewport_top+f32(3/cols)*summary_h+controls_h+28-offset
+    graph_controls_draw(a,x+36,viewport_top+rows*summary_h+8-offset,w-36)
+    details_y:=viewport_top+rows*summary_h+controls_h+details_gap-offset
     lw:=w if compact else (w-gap)*0.60
     overview_graphics(a,x,details_y,lw)
     if compact {overview_io(a,x,details_y+178,w)}
@@ -151,7 +200,7 @@ overview :: proc(a:^App) {
         rect(a,x+lw+gap/2,details_y,1,details_h,LINE)
         overview_io(a,x+lw+gap,details_y,w-lw-gap)
     }
-    process_panel(a,x-18,process_y-offset,w+36,process_h,unboxed=true)
+    process_panel(a,x-18,process_y-offset,w+36,process_h,gpu=a.cpu_pinned_slot>=0&&a.cpu_pinned_graph==1,unboxed=true)
     if max_scroll>0 {
         track_h:=viewport_bottom-viewport_top
         thumb_h:=max(24,track_h*track_h/(content_bottom-viewport_top))

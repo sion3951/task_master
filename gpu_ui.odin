@@ -176,6 +176,7 @@ gpu_dashboard :: proc(a:^App) {
     if a.click&&in_plot {
         if a.gpu_pinned_slot>=0 {a.gpu_pinned_slot=-1}
         else {a.gpu_pinned_slot=hover_slot;a.gpu_pinned_graph=hover_graph}
+        a.click=false
     }
     slot:=a.gpu_pinned_slot if a.gpu_pinned_slot>=0 else hover_slot
     if slot>=0&&history_position(a,slot)<0 {slot=-1;a.gpu_pinned_slot=-1}

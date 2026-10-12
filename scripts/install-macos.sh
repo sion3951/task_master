@@ -6,7 +6,8 @@ usage() {
     cat <<'USAGE'
 Usage: sudo sh scripts/install-macos.sh [--app PATH] [--remove]
 Install task_master.app in /Applications, its native SSH collector in
- /usr/local/libexec/task_master/collector, and the read-only sensor LaunchDaemon.
+ /usr/local/libexec/task_master/collector, protected update helpers in
+ /Library/PrivilegedHelperTools/task_master, and the read-only sensor LaunchDaemon.
 From a packaged build directory: sudo sh install-macos.sh
 --remove stops services and removes installed executables; user preferences remain.
 USAGE
@@ -32,6 +33,7 @@ daemon_plist=/Library/LaunchDaemons/$label.plist
 sensor_directory='/Library/Application Support/task_master'
 target_app=/Applications/task_master.app
 collector_directory=/usr/local/libexec/task_master
+update_directory=/Library/PrivilegedHelperTools/task_master
 case "$(uname -m)" in arm64) architecture=arm64; apple_arch=arm64 ;; x86_64) architecture=amd64; apple_arch=x86_64 ;; *) fail 'Unsupported Mac architecture.' ;; esac
 
 # launchctl bootout removes the job before all its processes necessarily exit.
@@ -77,7 +79,7 @@ if $remove; then
         [ -z "$user_home" ] || rm -rf "$user_home/Library/Application Support/task_master/persistence"
     fi
     rm -f "$daemon_plist"
-    rm -rf "$sensor_directory" /var/run/task_master "$target_app" "$collector_directory"
+    rm -rf "$sensor_directory" /var/run/task_master "$target_app" "$collector_directory" "$update_directory"
     printf 'task_master removed; user preferences and history caches retained.\n'
     exit 0
 fi
@@ -86,10 +88,12 @@ if [ -z "$source_app" ]; then
     if [ -d "$script_directory/task_master.app" ]; then source_app=$script_directory/task_master.app
     else source_app=$script_directory/../build/macos-$architecture/task_master.app; fi
 fi
-[ -f "$source_app/Contents/MacOS/task_master" ] && [ -f "$source_app/Contents/MacOS/task_master-collector" ] || fail "Incomplete app bundle: $source_app"
+for resource in MacOS/task_master MacOS/task_master-collector MacOS/task_master-update-helper Resources/update-install.sh; do
+    [ -f "$source_app/Contents/$resource" ] || fail "Incomplete app bundle: missing $resource"
+done
 # file ships with macOS; lipo requires developer tools that an end user's Mac
 # need not have. Accept a thin matching Mach-O or a universal binary containing it.
-for binary in task_master task_master-collector; do
+for binary in task_master task_master-collector task_master-update-helper; do
     binary_description=$(/usr/bin/file -b "$source_app/Contents/MacOS/$binary")
     case "$binary_description" in
         *Mach-O*" $apple_arch"*) ;;
@@ -101,7 +105,9 @@ sensor_source=$script_directory/task_master-sensors.sh
 [ -f "$sensor_source" ] || sensor_source=$script_directory/../sensors/macos/task_master-sensors.sh
 [ -f "$sensor_source" ] || fail "Missing packaged sensor helper: $sensor_source"
 sh -n "$sensor_source"
-for dedicated_path in "$sensor_directory" "$collector_directory" "$daemon_plist" /var/run/task_master; do
+for dedicated_path in "$sensor_directory" "$collector_directory" /Library/PrivilegedHelperTools "$update_directory" \
+    "$update_directory/update-helper" "$update_directory/update-helper.new" \
+    "$update_directory/update-install.sh" "$update_directory/update-install.sh.new" "$daemon_plist" /var/run/task_master; do
     [ ! -L "$dedicated_path" ] || fail "Refusing a symlink at an installed helper path: $dedicated_path"
 done
 
@@ -129,15 +135,20 @@ cat > "$staging/$label.plist" <<'PLIST'
 PLIST
 plutil -lint "$staging/$label.plist"
 stop_job "system/$label"
-install -d -o root -g wheel -m 755 "$sensor_directory" "$collector_directory"
+install -d -o root -g wheel -m 755 "$sensor_directory" "$collector_directory" /Library/PrivilegedHelperTools "$update_directory"
 install -o root -g wheel -m 644 "$staging/task_master-sensors.sh" "$sensor_directory/task_master-sensors.sh"
 install -o root -g wheel -m 644 "$0" "$sensor_directory/install-macos.sh"
 install -o root -g wheel -m 644 "$staging/$label.plist" "$daemon_plist"
 install -o root -g wheel -m 755 "$source_app/Contents/MacOS/task_master-collector" "$collector_directory/collector.new"
 mv -f "$collector_directory/collector.new" "$collector_directory/collector"
+install -o root -g wheel -m 755 "$staging/task_master.app/Contents/MacOS/task_master-update-helper" "$update_directory/update-helper.new"
+mv -f "$update_directory/update-helper.new" "$update_directory/update-helper"
+install -o root -g wheel -m 755 "$staging/task_master.app/Contents/Resources/update-install.sh" "$update_directory/update-install.sh.new"
+mv -f "$update_directory/update-install.sh.new" "$update_directory/update-install.sh"
 if [ -e "$target_app" ]; then mv "$target_app" "$staging/Previous.app"; fi
 mv "$staging/task_master.app" "$target_app"
-chown -R root:wheel "$target_app" "$sensor_directory" "$collector_directory"
+chown -R root:wheel "$target_app" "$sensor_directory" "$collector_directory" "$update_directory"
+chmod -R go-w "$target_app" "$sensor_directory" "$collector_directory" "$update_directory"
 launchctl enable "system/$label"
 if ! launchctl bootstrap system "$daemon_plist"; then
     fail 'task_master was installed, but its sensor LaunchDaemon could not start. Run this installer again to retry.'

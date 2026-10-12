@@ -35,6 +35,7 @@ Renderer :: struct {
     fonts: [len(FONT_SIZES)]Font_Size,
     font_scale: f32,
     atlas_height: int,
+    atlas: Font_Atlas,
     frames: [3]Metal_Frame,
     frame_index: int,
     drawable: ^CA.MetalDrawable,
@@ -92,10 +93,11 @@ renderer_font_upload :: proc(r:^Renderer,atlas:^Font_Atlas)->bool {
     if r.font_texture!=nil {r.font_texture->release()}
     r.font_texture=texture
     r.fonts=atlas.fonts;r.font_scale=atlas.scale;r.atlas_height=atlas.height
-    uploaded=true
+    uploaded=true;atlas.dirty=false
     return true
 }
 renderer_set_scale :: proc(r:^Renderer,scale:f32)->bool {
+    renderer_font_begin(r)
     target:=clamp(scale,0.5,4.0)
     if abs(r.font_scale-target)<0.001 {return true}
     pool:=NS.AutoreleasePool.alloc()->init()
@@ -103,8 +105,10 @@ renderer_set_scale :: proc(r:^Renderer,scale:f32)->bool {
     // A DPI change is infrequent; finish frames before replacing their texture.
     if !renderer_metal_idle(r) {return false}
     atlas:=Font_Atlas{scale=target}
-    defer delete(atlas.pixels)
-    return renderer_font_rasterize(&atlas)&&renderer_font_upload(r,&atlas)
+    defer renderer_font_dispose(&atlas)
+    if !renderer_font_rasterize(&atlas)||!renderer_font_upload(r,&atlas) {return false}
+    renderer_font_accept(r,&atlas)
+    return true
 }
 renderer_init :: proc(r:^Renderer,width,height:int,title:cstring)->bool {
     stage:=time.tick_now()
@@ -123,7 +127,7 @@ renderer_init :: proc(r:^Renderer,width,height:int,title:cstring)->bool {
     else {atlas.ready=renderer_font_rasterize(&atlas)}
     defer {
         if worker!=nil {thread.destroy(worker)}
-        delete(atlas.pixels)
+        renderer_font_dispose(&atlas)
     }
     stage=startup_stage(stage,"AppKit / window")
     r.device=MTL.CreateSystemDefaultDevice()
@@ -175,6 +179,7 @@ renderer_init :: proc(r:^Renderer,width,height:int,title:cstring)->bool {
     stage=startup_stage(stage,"Metal shaders / pipeline")
     if worker!=nil {thread.join(worker)}
     if !atlas.ready||!renderer_font_upload(r,&atlas) {return false}
+    renderer_font_accept(r,&atlas)
     stage=startup_stage(stage,"CoreText join / upload")
     r.capture_supported=true
     initialized=true
@@ -224,6 +229,9 @@ renderer_reserve_vertices :: proc(r:^Renderer,frame:^Metal_Frame,size:int)->bool
 renderer_draw :: proc(r:^Renderer,vertices:[]Vertex,image_index:u32)->bool {
     defer renderer_release_frame(r)
     if r.drawable==nil||int(image_index)!=r.frame_index {return false}
+    if r.atlas.dirty {
+        if !renderer_metal_idle(r)||!renderer_font_upload(r,&r.atlas) {return false}
+    }
     frame:=&r.frames[r.frame_index]
     if !renderer_reserve_vertices(r,frame,len(vertices)*size_of(Vertex)) {return false}
     mem.copy(frame.vertices->contentsPointer(),raw_data(vertices),len(vertices)*size_of(Vertex))
@@ -273,6 +281,7 @@ renderer_draw :: proc(r:^Renderer,vertices:[]Vertex,image_index:u32)->bool {
     return true
 }
 renderer_destroy :: proc(r:^Renderer) {
+    renderer_font_dispose(&r.atlas)
     renderer_metal_idle(r)
     renderer_release_frame(r)
     for &frame in r.frames {if frame.vertices!=nil {frame.vertices->release()}}

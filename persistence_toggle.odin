@@ -3,7 +3,6 @@ package main
 import "core:sync"
 import "core:thread"
 import "core:time"
-import glfw "desktop_window"
 
 // A change owns only immutable command input and detached resources. It never
 // accesses live App/Machine state from a worker.
@@ -114,9 +113,10 @@ persistence_change_poll :: proc(a:^App) {
             local.state.metrics.gpu_count=persistence_local_gpu_count
             local.state.metrics.cpu_power_source=persistence_local_power_source
         }
-        // Prime on the next sampling pass; keep the displayed history intact.
-        persistence_local_needs_prime=true
-        local.state.last_sample=glfw.GetTime()
+        // The local worker owns driver reinitialization and rate priming.
+        persistence_local_handoff_pending=false
+        persistence_local_handoff_completed_at=0
+        local_sampler_configure(local.local_sampler,true,local.state.paused,a.interval)
         local.status=.Live;local.message_len=0;local.persistence_stamp=0;local.persistence_live_stamp=0
         persistence_local_captured=false
         for m in a.machines[:] {

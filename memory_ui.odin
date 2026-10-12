@@ -52,7 +52,7 @@ memory_dashboard :: proc(a:^App) {
     if !show_swap {heights[1]=0}
     graph_gaps:=ram_gap+plot_gap*f32(2 if show_swap else 1)
     controls_h:=graph_controls_height(w-48)+8
-    content_bottom:=graph_y+heights[0]+heights[1]+heights[2]+heights[3]+graph_gaps+time_axis_h+controls_h
+    content_bottom:=graph_y+heights[0]+heights[1]+heights[2]+heights[3]+graph_gaps+time_axis_h+controls_h+248
     spare:=max(0,viewport_bottom-content_bottom)
     for &height,i in heights {
         if i==1&&!show_swap {continue}
@@ -109,6 +109,7 @@ memory_dashboard :: proc(a:^App) {
     if a.click&&in_plot {
         if a.memory_pinned_slot>=0 {a.memory_pinned_slot=-1}
         else {a.memory_pinned_slot=hover_slot;a.memory_pinned_graph=hover_graph}
+        a.click=false
     }
     slot:=a.memory_pinned_slot if a.memory_pinned_slot>=0 else hover_slot
     if slot>=0&&history_position(a,slot)<0 {slot=-1;a.memory_pinned_slot=-1}
@@ -273,6 +274,7 @@ memory_dashboard :: proc(a:^App) {
         history_time_label(a,slot,a.memory_pinned_slot>=0,cursor_x,graph_xs[label_graph],graph_ys[label_graph],graph_ws[label_graph],graph_hs[label_graph])
     }
     graph_controls_draw(a,gx,yy+time_axis_h+8,gw)
+    process_panel(a,x-18,yy+time_axis_h+controls_h+26,w+36,230,unboxed=true)
     if max_scroll>0 {
         track_h:=viewport_bottom-viewport_top
         thumb_h:=max(24,track_h*track_h/(content_bottom-viewport_top))

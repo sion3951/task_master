@@ -92,6 +92,10 @@ for target_arch in $architectures; do
     set -- "$@" "-define:$define=build/task_master-collector-darwin-$target_arch"
     "$@"
     cp "build/task_master-collector-darwin-$target_arch" "$bundle/Contents/MacOS/task_master-collector"
+    "$odin" build updater_helper "-target:darwin_$target_arch" -minimum-os-version:13.0 \
+        "-out:$bundle/Contents/MacOS/task_master-update-helper" -o:speed -vet \
+        -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=65536 "-define:TASK_MASTER_VERSION=$version"
+    install -m 644 scripts/update-install-unix.sh "$bundle/Contents/Resources/update-install.sh"
     # Native Apple frameworks are supplied by macOS. Reject accidental external
     # dependencies and deployment targets newer than the macOS 13 baseline.
     python3 scripts/validate-macos-bundle.py "$bundle" "$apple_arch"
@@ -119,6 +123,7 @@ path.write_bytes(plistlib.dumps(info))
 PY
     cp assets/FONT-LICENSE.txt "$bundle/Contents/Resources/licenses/"
     xcrun codesign --force --sign "${SIGN_IDENTITY:--}" "$bundle/Contents/MacOS/task_master-collector"
+    xcrun codesign --force --sign "${SIGN_IDENTITY:--}" "$bundle/Contents/MacOS/task_master-update-helper"
     xcrun codesign --force --sign "${SIGN_IDENTITY:--}" "$bundle"
     xcrun codesign --verify --strict "$bundle"
     mkdir -p "$output"

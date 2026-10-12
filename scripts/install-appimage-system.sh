@@ -10,31 +10,41 @@ destination=/opt/task_master
 launcher=/usr/local/bin/task_master
 desktop=/usr/local/share/applications/task_master.desktop
 icon=/usr/local/share/icons/hicolor/scalable/apps/task_master.svg
-for path in /opt "$destination" "$launcher" "$desktop" "$icon" /usr/local/libexec/task_master; do
+for path in /opt "$destination" "$launcher" "$desktop" "$icon" /usr/local/libexec/task_master \
+    /usr/local/libexec/task_master/update-helper /usr/local/libexec/task_master/update-install.sh; do
     [ ! -L "$path" ] || { echo "Refusing a symlink at $path" >&2; exit 1; }
 done
 case "$action" in
     --remove)
-        rm -f "$launcher" "$desktop" "$icon" /usr/local/libexec/task_master/collector
+        rm -f "$launcher" "$desktop" "$icon" /usr/local/libexec/task_master/collector \
+            /usr/local/libexec/task_master/update-helper /usr/local/libexec/task_master/update-install.sh
         rm -rf "$destination"
         echo 'task_master removed; user preferences and history retained.'
         exit 0 ;;
     ''|--install) ;;
     *) echo 'Unknown installation action.' >&2; exit 2 ;;
 esac
-for file in AppRun usr/bin/task_master usr/libexec/task_master/collector usr/share/task_master/install-system.sh; do
+for file in AppRun usr/bin/task_master usr/libexec/task_master/collector usr/libexec/task_master/update-helper usr/libexec/task_master/update-install.sh usr/share/task_master/install-system.sh; do
     [ -f "$appdir/$file" ] || { echo "Incomplete package: missing $file" >&2; exit 1; }
 done
 command -v setcap >/dev/null 2>&1 || { echo 'Install libcap2-bin (Debian/Ubuntu) or libcap (other distributions) and retry.' >&2; exit 1; }
 install -d -o root -g root -m 755 /opt
 stage=$(mktemp -d /opt/.task_master-install-XXXXXX)
-trap 'rm -rf "$stage"' EXIT
+helper_stage=
+trap 'rm -rf "$stage"; [ -z "$helper_stage" ] || rm -rf "$helper_stage"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM
 cp -a "$appdir/." "$stage/runtime"
 chown -hR root:root "$stage/runtime"
 chmod -R go-w "$stage/runtime"
 sh "$stage/runtime/usr/share/task_master/install-system.sh" "$stage/runtime/usr/libexec/task_master/collector"
+# The elevated helper must not inherit the AppImage's private library search
+# path. Install its rpath-free copy alongside the protected orchestration script.
+helper_stage=$(mktemp -d /usr/local/libexec/task_master/.update-install-XXXXXX)
+install -o root -g root -m 755 "$stage/runtime/usr/libexec/task_master/update-helper" "$helper_stage/update-helper"
+install -o root -g root -m 755 "$stage/runtime/usr/libexec/task_master/update-install.sh" "$helper_stage/update-install.sh"
+mv -f "$helper_stage/update-helper" /usr/local/libexec/task_master/update-helper
+mv -f "$helper_stage/update-install.sh" /usr/local/libexec/task_master/update-install.sh
 if [ -e "$destination" ]; then mv "$destination" "$stage/previous"; fi
 mv "$stage/runtime" "$destination"
 install -d -o root -g root -m 755 /usr/local/bin /usr/local/share/applications /usr/local/share/icons/hicolor/scalable/apps

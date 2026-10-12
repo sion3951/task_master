@@ -267,12 +267,13 @@ cpu_dashboard :: proc(a:^App) {
     graph_h:=plot_header_h+busy_h+small_h*2+plot_gap*2+time_axis_h+controls_h
     // Share spare height between the histories and core rows; keep scrolling
     // for smaller windows and machines with more cores instead of squeezing.
-    spare:=max(0,viewport_bottom-(graph_y+graph_h+core_gap+max(0,f32(rows)*cell_h-24)))
+    spare:=max(0,viewport_bottom-(graph_y+graph_h+core_gap+max(0,f32(rows)*cell_h-24)+248))
     busy_h+=spare*0.25
     small_h+=spare*0.125
     if rows>0 {cell_h+=spare*0.5/f32(rows)}
     graph_h=plot_header_h+busy_h+small_h*2+plot_gap*2+time_axis_h+controls_h
-    core_y:=graph_y+graph_h+core_gap
+    process_y:=graph_y+graph_h+core_gap
+    core_y:=process_y+248
     content_bottom:=core_y+max(0,f32(rows)*cell_h-24)
     max_scroll:=max(0,content_bottom-viewport_bottom)
     a.cpu_scroll=clamp(a.cpu_scroll,0,max_scroll)
@@ -308,6 +309,7 @@ cpu_dashboard :: proc(a:^App) {
     if a.click&&in_plot {
         if a.cpu_pinned_slot>=0 {a.cpu_pinned_slot=-1}
         else {a.cpu_pinned_slot=hover_slot;a.cpu_pinned_graph=hover_graph}
+        a.click=false
     }
     slot:=a.cpu_pinned_slot if a.cpu_pinned_slot>=0 else hover_slot
     if slot>=0&&(a.cpu_history[slot].generation!=m.cpu_topology_generation||history_position(a,slot)<0) {slot=-1;a.cpu_pinned_slot=-1}
@@ -391,6 +393,7 @@ cpu_dashboard :: proc(a:^App) {
             history_time_label(a,slot,a.cpu_pinned_slot>=0,cursor_x,gx,graph_ys[label_graph],gw,graph_hs[label_graph])
         }
     }
+    process_panel(a,x-18,process_y-offset,w+36,230,unboxed=true)
     for col in 1..<cols {
         divider_x:=x+f32(col)*(cell_w+gap)-gap/2
         rect(a,divider_x,core_y-offset,1,f32(rows)*cell_h-24,LINE)

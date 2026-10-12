@@ -34,6 +34,7 @@ graph_settings_apply :: proc(a:^App,max_time,polling:f64) {
     interval:=clamp(polling,0.1,10)
     if a.interval!=interval {
         a.interval=interval
+        if a.local_machine!=nil {local_sampler_configure(a.local_machine.local_sampler,persistence_headless||!a.persistence_enabled||persistence_local_handoff_pending,a.local_machine.state.paused,interval)}
         for m in a.machines {if m.connection!=nil {remote_connection_set_interval(m.connection,interval)}}
     }
     a.dirty=true
