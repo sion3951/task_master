@@ -507,7 +507,9 @@ persistence_service_main :: proc() {
     a.persistence_io_session=persistence_io_session_read()
     if a.persistence_io_session<=0 {
         a.persistence_io_session=persistence_wall_time()
-        if !persistence_io_session_write(a.persistence_io_session) {fmt.eprintln("Could not initialize persistence I/O totals.");return}
+        // An unwritable or dangling cache directory must not stop sampling: the
+        // runtime caches may still work, and totals then cover this run only.
+        if !persistence_io_session_write(a.persistence_io_session) {fmt.eprintln("Could not save persistence I/O totals; they will restart with the service.")}
     }
     machines_init(a)
     defer machines_destroy(a)
