@@ -185,7 +185,7 @@ machine_add :: proc(a:^App,host,name,collector:string,save:bool=true,persistent:
     }
     machine_connect(a,m)
     if persistence_headless {
-        cache,ok:=persistence_cache_read(m)
+        cache,ok:=persistence_cache_read_newest(m)
         if ok {
             first_recent:=persistence_recent_start(cache.samples,persistence_wall_time()-HISTORY_SECONDS)
             cache.samples=cache.samples[first_recent:]

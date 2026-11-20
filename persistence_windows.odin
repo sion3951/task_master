@@ -78,6 +78,8 @@ platform_atomic_replace :: proc(source,destination:string)->bool {
     }
     return false
 }
+// Published caches share the durable user cache directory on this platform.
+persistence_platform_runtime_base :: proc()->string {return ""}
 persistence_platform_cache_open :: proc(path:string)->(^os.File,os.Error) {
     handle:=win32.CreateFileW(win32.utf8_to_wstring(path),win32.GENERIC_READ,win32.FILE_SHARE_READ|win32.FILE_SHARE_WRITE|win32.FILE_SHARE_DELETE,nil,win32.OPEN_EXISTING,win32.FILE_ATTRIBUTE_NORMAL,nil)
     if handle==win32.INVALID_HANDLE {return nil,os.Platform_Error(win32.GetLastError())}

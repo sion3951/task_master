@@ -53,6 +53,8 @@ Persistence_History_Scratch :: struct {
 Persistence_Reader :: struct {
     worker: ^thread.Thread,
     mutex: sync.Mutex,
+    // Signalled for new requests and shutdown between scheduled scans.
+    wake: sync.Cond,
     stop: bool,
     live: bool,
     poll_seconds: f64,
@@ -113,6 +115,7 @@ persistence_reader_submit :: proc(a:^App,now:f64,live:bool=false) {
     }
     reader.requests_pending=true
     reader.last_submit=now
+    sync.cond_signal(&reader.wake)
     sync.mutex_unlock(&reader.mutex)
 }
 persistence_reader_start :: proc(a:^App) {
@@ -151,7 +154,10 @@ persistence_reader_start_mode :: proc(a:^App,live:bool) {
 }
 persistence_reader_destroy :: proc(reader:^Persistence_Reader) {
     if reader==nil {return}
+    sync.mutex_lock(&reader.mutex)
     sync.atomic_store(&reader.stop,true)
+    sync.cond_signal(&reader.wake)
+    sync.mutex_unlock(&reader.mutex)
     if reader.worker!=nil {thread.join(reader.worker);thread.destroy(reader.worker)}
     for result in reader.ready[:] {persistence_read_result_destroy(result)}
     for result in reader.spare[:] {persistence_read_result_destroy(result)}
@@ -202,7 +208,16 @@ persistence_reader_worker :: proc(reader:^Persistence_Reader) {
     defer delete(requests)
     last_scan:=time.tick_add(time.tick_now(),-time.Second)
     poll_seconds:f64=1
+    // The live reader announces this desktop as a viewer. Its first heartbeat
+    // also requests complete histories instead of waiting for a periodic one.
+    last_heartbeat:time.Tick
+    history_request:=reader.started_at
     for !sync.atomic_load(&reader.stop) {
+        if reader.live&&(last_heartbeat==(time.Tick{})||time.tick_since(last_heartbeat)>=PERSISTENCE_VIEWER_HEARTBEAT_SECONDS*time.Second) {
+            if persistence_viewer_write(history_request) {history_request=0}
+            last_heartbeat=time.tick_now()
+            mem.free_all(context.temp_allocator)
+        }
         changed:=false
         sync.mutex_lock(&reader.mutex)
         poll_seconds=reader.poll_seconds
@@ -304,7 +319,12 @@ persistence_reader_worker :: proc(reader:^Persistence_Reader) {
                 platform_memory_release()
             }
         }
-        time.sleep(10*time.Millisecond if reader.live else 50*time.Millisecond)
+        // Wait for the next scan, heartbeat, request change or shutdown.
+        wait:=time.Duration(poll_seconds*1e9)-time.tick_since(last_scan)
+        if reader.live {wait=min(wait,PERSISTENCE_VIEWER_HEARTBEAT_SECONDS*time.Second-time.tick_since(last_heartbeat))}
+        sync.mutex_lock(&reader.mutex)
+        if wait>0&&!reader.requests_pending&&!sync.atomic_load(&reader.stop) {_=sync.cond_wait_with_timeout(&reader.wake,&reader.mutex,wait)}
+        sync.mutex_unlock(&reader.mutex)
     }
 }
 

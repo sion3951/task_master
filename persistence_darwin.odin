@@ -238,4 +238,6 @@ platform_private_path :: proc(path:string,directory:bool)->bool {
     permissions:=information.mode&os.Permissions{.Read_User,.Write_User,.Execute_User}
     return os.chmod(path,permissions)==nil
 }
+// Published caches share the durable user cache directory on this platform.
+persistence_platform_runtime_base :: proc()->string {return ""}
 persistence_platform_cache_open :: proc(path:string)->(^os.File,os.Error) {return os.open(path)}

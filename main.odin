@@ -5,6 +5,7 @@ import "core:fmt"
 import "core:math"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import "core:thread"
 import glfw "desktop_window"
@@ -194,10 +195,12 @@ App :: struct {
     update_dialog: bool,
 }
 
-// Headless service workers use the same sampling code without touching GLFW.
+// Headless service workers use the same sampling code without touching GLFW;
+// their wakeups release the service loop instead of a fixed 10 Hz poll.
 persistence_headless: bool
+persistence_wake: sync.Sema
 app_wake :: proc() {
-    if !persistence_headless {glfw.PostEmptyEvent()}
+    if persistence_headless {sync.sema_post(&persistence_wake)} else {glfw.PostEmptyEvent()}
 }
 
 rect :: proc(a: ^App, x,y,w,h:f32, c:Color) {

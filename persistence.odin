@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:time"
 
 PERSISTENCE_CACHE_VERSION :: 1
@@ -14,6 +15,15 @@ PERSISTENCE_CACHE_VERSION :: 1
 PERSISTENCE_MAX_CACHE_BYTES :: 256*1024*1024
 PERSISTENCE_MAX_LIVE_CACHE_BYTES :: 64*1024*1024
 PERSISTENCE_LIVE_SAMPLES :: 22
+// Each history file holds five minutes of samples (megabytes of JSON), so it is
+// republished rarely; an open viewer follows the small live file instead.
+PERSISTENCE_HISTORY_PUBLISH_SECONDS :: 30
+// Where the published caches live in a runtime tmpfs, a durable copy in the
+// user cache directory carries history and I/O totals across reboots.
+PERSISTENCE_DURABLE_PUBLISH_SECONDS :: 600
+// Viewers announce themselves; without one the service skips live files.
+PERSISTENCE_VIEWER_HEARTBEAT_SECONDS :: 2
+PERSISTENCE_VIEWER_TIMEOUT_SECONDS :: 6
 
 // Display snapshots use the same validated wire format as SSH. Private sampler
 // counters, GPU handles and file descriptors never enter the cache.
@@ -52,7 +62,7 @@ Persistence_Cache :: struct {
     io_summary: IO_Summary,
 }
 Persistence_Publication :: struct {
-    sampled_at: f64,
+    sampled_at, published_at: f64,
     status: Connection_Status,
     message: [512]u8,
     message_len: int,
@@ -76,6 +86,21 @@ persistence_directory :: proc()->string {
     base,err:=os.user_cache_dir(context.temp_allocator)
     if err!=nil {return ""}
     return fmt.tprintf("%s/task_master/persistence",base)
+}
+// Frequently replaced caches belong in a per-user runtime tmpfs when the
+// platform has one; otherwise they share the durable cache directory.
+persistence_runtime_once: sync.Once
+persistence_runtime_buffer: [1024]u8
+persistence_runtime_len: int
+persistence_runtime_directory :: proc()->string {
+    sync.once_do(&persistence_runtime_once,proc() {
+        base:=persistence_platform_runtime_base()
+        if base=="" {return}
+        path:=fmt.tprintf("%s/task_master/persistence",base)
+        if len(path)<=len(persistence_runtime_buffer) {persistence_runtime_len=copy(persistence_runtime_buffer[:],path)}
+    })
+    if persistence_runtime_len==0 {return persistence_directory()}
+    return string(persistence_runtime_buffer[:persistence_runtime_len])
 }
 persistence_io_session_path :: proc()->string {
     directory:=persistence_directory()
@@ -115,8 +140,8 @@ persistence_service_set :: proc(a:^App,enable:bool,refresh_only:bool=false,force
     if reset {a.persistence_io_session=session}
     return true
 }
-persistence_cache_path :: proc(m:^Machine,live:bool=false)->string {
-    directory:=persistence_directory()
+persistence_cache_path :: proc(m:^Machine,live:bool=false,durable:bool=false)->string {
+    directory:=persistence_directory() if durable else persistence_runtime_directory()
     if directory=="" {return ""}
     hash:u64=14695981039346656037
     for byte in m.host[:m.host_len] {hash=(hash~u64(byte))*1099511628211}
@@ -158,10 +183,11 @@ persistence_cache_atomic_write :: proc(path:string,cache:Persistence_Cache,live:
     marshal_error:=json.marshal_to_writer(bufio.writer_to_writer(&writer),cache,&options)
     flush_error:=bufio.writer_flush(&writer)
     size,size_error:=os.file_size(file)
-    sync_error:=os.flush(file)
+    // No fsync: the rename already publishes either the old or the complete new
+    // file, and forcing every disposable snapshot to disk defeats writeback.
     close_error:=os.close(file)
     limit:=i64(PERSISTENCE_MAX_LIVE_CACHE_BYTES if live else PERSISTENCE_MAX_CACHE_BYTES)
-    if marshal_error!=nil||flush_error!=nil||size_error!=nil||close_error!=nil||sync_error!=nil||size>limit {return false}
+    if marshal_error!=nil||flush_error!=nil||size_error!=nil||close_error!=nil||size>limit {return false}
     if !platform_private_path(temporary,false)||!platform_atomic_replace(temporary,path) {return false}
     published=true
     return true
@@ -172,8 +198,8 @@ persistence_toggle :: proc(a:^App)->bool {
     return persistence_change_start(a)
 }
 
-persistence_cache_read :: proc(m:^Machine,live:bool=false)->(cache:Persistence_Cache,ok:bool) {
-    path:=persistence_cache_path(m,live)
+persistence_cache_read :: proc(m:^Machine,live:bool=false,durable:bool=false)->(cache:Persistence_Cache,ok:bool) {
+    path:=persistence_cache_path(m,live,durable)
     if path=="" {return}
     file,err:=persistence_platform_cache_open(path)
     if err!=nil {return}
@@ -215,6 +241,15 @@ persistence_cache_read :: proc(m:^Machine,live:bool=false)->(cache:Persistence_C
         previous=s.timestamp
     }
     ok=true
+    return
+}
+// The service restores the newer of its runtime and durable histories: the
+// runtime copy survives service restarts, the durable one reboots and upgrades.
+persistence_cache_read_newest :: proc(m:^Machine)->(cache:Persistence_Cache,ok:bool) {
+    cache,ok=persistence_cache_read(m)
+    if persistence_cache_path(m,durable=true)==persistence_cache_path(m) {return}
+    durable,durable_ok:=persistence_cache_read(m,durable=true)
+    if durable_ok&&(!ok||durable.written_at>cache.written_at) {return durable,true}
     return
 }
 persistence_cache_apply :: proc(a:^App,m:^Machine,cache:Persistence_Cache,restore_snapshot:bool=true)->bool {
@@ -276,44 +311,7 @@ persistence_local_captured:bool
 persistence_local_nvml:bool
 persistence_local_gpu_count:int
 persistence_local_power_source:CPU_Power_Source
-persistence_poll :: proc(a:^App,now:f64) {
-    if persistence_headless||!a.persistence_enabled||now-a.persistence_last_poll<0.5 {return}
-    a.persistence_last_poll=now
-    wall:=persistence_wall_time()
-    local_current:=false
-    for m in a.machines[:] {
-        if m!=a.local_machine&&!m.persistent {continue}
-        if m.state==nil {machine_connect(a,m)}
-        cache,ok:=persistence_cache_read(m)
-        healthy:=ok&&cache.written_at<=wall+2
-        if m==a.local_machine {
-            healthy=healthy&&wall-cache.written_at<=persistence_freshness_seconds(a)&&cache.snapshot!=""
-            if !persistence_local_captured {
-                persistence_local_nvml=m.state.metrics.nvml_available
-                persistence_local_gpu_count=m.state.metrics.gpu_count
-                persistence_local_power_source=m.state.metrics.cpu_power_source
-                persistence_local_captured=true
-            }
-        } else {healthy=healthy&&local_current}
-        if ok&&!m.state.paused&&cache.written_at!=m.persistence_stamp {
-            if !persistence_cache_apply(a,m,cache) {healthy=false}
-        }
-        if m==a.local_machine {local_current=healthy}
-        // Pause freezes display data, while service availability still updates.
-        if !healthy {
-            m.status=.Disconnected
-            m.message_len=copy(m.message[:],"Persistence service cache is unavailable or stale.")
-            a.dirty=true
-        } else if m.state.paused {
-            m.status=cache.status;m.message_len=copy(m.message[:],cache.message)
-            m.received=time.tick_add(time.tick_now(),-time.Duration(max(0,wall-cache.sampled_at)*1e9))
-        }
-    }
-    if !local_current {persistence_error_set(a,"Persistence service is starting or unavailable; cached graphs are retained.")}
-    else if a.persistence_error_len>0 {a.persistence_error_len=0;a.dirty=true}
-}
-
-persistence_cache_write :: proc(a:^App,m:^Machine,live:bool=false)->bool {
+persistence_cache_write :: proc(a:^App,m:^Machine,live:bool=false,durable:bool=false)->bool {
     state:=m.state
     snapshot:string
     defer delete(snapshot)
@@ -355,7 +353,10 @@ persistence_cache_write :: proc(a:^App,m:^Machine,live:bool=false)->bool {
     cache:=Persistence_Cache{version=PERSISTENCE_CACHE_VERSION,host=string(m.host[:m.host_len]),
         collector=string(m.collector[:m.collector_len]),port=m.port,written_at=persistence_wall_time(),
         sampled_at=sampled_at,status=m.status,message=string(m.message[:m.message_len]),snapshot=snapshot,samples=samples[first_recent:],io_summary=state.io_summary}
-    return persistence_cache_atomic_write(persistence_cache_path(m,live),cache,live)
+    if !persistence_cache_atomic_write(persistence_cache_path(m,live),cache,live) {return false}
+    durable_path:=persistence_cache_path(m,durable=true)
+    if live||!durable||durable_path==persistence_cache_path(m) {return true}
+    return persistence_cache_atomic_write(durable_path,cache)
 }
 
 // The daemon only reads machines.json. All discovery and configuration writes
@@ -385,7 +386,10 @@ persistence_config_reconcile :: proc(a:^App)->bool {
             collector:=r.collector;if collector=="" {collector=DEFAULT_COLLECTOR}
             if !r.hidden&&!r.automatic&&strings.equal_fold(r.host,string(m.host[:m.host_len]))&&r.port==m.port&&collector==string(m.collector[:m.collector_len]) {keep=true;break}
         }
-        if !keep {_=os.remove(persistence_cache_path(m));_=os.remove(persistence_cache_path(m,true));machine_free(m);ordered_remove(&a.machines,i)}
+        if !keep {
+            _=os.remove(persistence_cache_path(m));_=os.remove(persistence_cache_path(m,true));_=os.remove(persistence_cache_path(m,durable=true))
+            machine_free(m);ordered_remove(&a.machines,i)
+        }
     }
     a.machine_count=len(a.machines)
     for r in records {
@@ -428,8 +432,24 @@ persistence_retry_poll :: proc(a:^App) {
         _=os.remove(path)
     }
 }
+// Files owned by one machine identity in either cache directory. Active
+// publishers keep their own in-progress temporary files.
+persistence_cache_owned :: proc(m:^Machine,path:string,active_publishers:bool)->bool {
+    full,live,durable:=persistence_cache_path(m),persistence_cache_path(m,true),persistence_cache_path(m,durable=true)
+    if path==full||path==live||path==durable||path==fmt.tprintf("%s.retry",full) {return true}
+    if !active_publishers {return false}
+    pid:=os.get_pid()
+    return path==fmt.tprintf("%s.tmp-%d",full,pid)||path==fmt.tprintf("%s.tmp-%d",live,pid)||path==fmt.tprintf("%s.tmp-%d",durable,pid)
+}
 persistence_cache_prune :: proc(a:^App,active_publishers:bool=false) {
-    directory:=persistence_directory()
+    durable:=persistence_directory()
+    runtime:=persistence_runtime_directory()
+    // Older releases kept live files and retry requests beside the durable
+    // history; those are removed here once the runtime directory is in use.
+    persistence_cache_prune_directory(a,runtime,active_publishers)
+    if durable!=runtime {persistence_cache_prune_directory(a,durable,active_publishers)}
+}
+persistence_cache_prune_directory :: proc(a:^App,directory:string,active_publishers:bool) {
     if directory=="" {return}
     files,err:=os.read_all_directory_by_path(directory,context.temp_allocator)
     if err!=nil {return}
@@ -437,23 +457,45 @@ persistence_cache_prune :: proc(a:^App,active_publishers:bool=false) {
         path:=fmt.tprintf("%s/%s",directory,file.name)
         if !strings.has_suffix(file.name,".json")&&!strings.contains(file.name,".json.tmp-")&&!strings.has_suffix(file.name,".json.retry") {continue}
         keep:=false
-        for m in a.machines[:] {
-            full:=persistence_cache_path(m)
-            live:=persistence_cache_path(m,true)
-            if path==full||path==live||path==fmt.tprintf("%s.retry",full)||active_publishers&&
-                (path==fmt.tprintf("%s.tmp-%d",full,os.get_pid())||path==fmt.tprintf("%s.tmp-%d",live,os.get_pid())) {
-                keep=true;break
-            }
-        }
+        for m in a.machines[:] {if persistence_cache_owned(m,path,active_publishers) {keep=true;break}}
         if !keep {
             for r in a.machine_saved_records {
                 pending:=Machine{port=r.port}
                 pending.host_len=copy(pending.host[:],r.host);pending.collector_len=copy(pending.collector[:],r.collector)
-                if path==persistence_cache_path(&pending)||path==persistence_cache_path(&pending,true)||path==fmt.tprintf("%s.retry",persistence_cache_path(&pending)) {keep=true;break}
+                if persistence_cache_owned(&pending,path,false) {keep=true;break}
             }
         }
         if !keep {_=os.remove(path)}
     }
+}
+
+// Desktop viewers refresh a heartbeat while their readers run. A newer
+// history request asks the service to publish complete histories now.
+Persistence_Viewer :: struct {
+    heartbeat, history_request: f64,
+}
+persistence_viewer_path :: proc()->string {
+    directory:=persistence_runtime_directory()
+    if directory=="" {return ""}
+    return fmt.tprintf("%s/viewer",directory)
+}
+persistence_viewer_read :: proc()->(viewer:Persistence_Viewer) {
+    path:=persistence_viewer_path()
+    if path=="" {return}
+    file,err:=persistence_platform_cache_open(path)
+    if err!=nil {return}
+    defer os.close(file)
+    buffer:[256]u8
+    count,read_error:=os.read(file,buffer[:])
+    if read_error!=nil||count<=0||count==len(buffer)||json.unmarshal(buffer[:count],&viewer,allocator=context.temp_allocator)!=nil||
+        !remote_nonnegative(viewer.heartbeat)||!remote_nonnegative(viewer.history_request) {return {}}
+    return
+}
+persistence_viewer_write :: proc(history_request:f64)->bool {
+    // Several desktops may share one service; never move a request backwards.
+    viewer:=Persistence_Viewer{heartbeat=persistence_wall_time(),history_request=max(history_request,persistence_viewer_read().history_request)}
+    data,err:=json.marshal(viewer,allocator=context.temp_allocator)
+    return err==nil&&persistence_atomic_write(persistence_viewer_path(),data)
 }
 
 persistence_service_main :: proc() {
@@ -478,7 +520,7 @@ persistence_service_main :: proc() {
     _=persistence_config_reconcile(a)
     persistence_cache_prune(a)
     for m in a.machines[:] {
-        cache,ok:=persistence_cache_read(m)
+        cache,ok:=persistence_cache_read_newest(m)
         if ok {
             cutoff:=persistence_wall_time()-HISTORY_SECONDS
             first_recent:=persistence_recent_start(cache.samples,cutoff)
@@ -509,6 +551,10 @@ persistence_service_main :: proc() {
     local.state.last_sample=-time.duration_seconds(time.tick_since(local.received))
     last_config:f64=-1
     last_publication:f64=-1
+    last_durable:f64=0
+    last_viewer:f64=-1
+    viewer_active:=false
+    viewer_request:f64=0
     for !persistence_platform_service_stop_requested() {
         now:=time.duration_seconds(time.tick_since(started))
         graph_settings_poll(a)
@@ -526,40 +572,58 @@ persistence_service_main :: proc() {
             persistence_retry_poll(a)
             last_config=now
         }
+        if now-last_viewer>=0.5 {
+            viewer:=persistence_viewer_read()
+            wall:=persistence_wall_time()
+            active:=viewer.heartbeat>0&&wall-viewer.heartbeat<=PERSISTENCE_VIEWER_TIMEOUT_SECONDS&&viewer.heartbeat<=wall+2
+            // A new viewer receives current live files and complete histories
+            // immediately rather than after the next periodic publication.
+            if active&&!viewer_active||viewer.history_request>viewer_request {
+                clear(&publications);clear(&live_publications);last_publication=-1
+            }
+            viewer_active=active;viewer_request=max(viewer_request,viewer.history_request)
+            last_viewer=now
+        }
         machines_discovery_poll(a)
         machines_sample(a,now)
-        for m in a.machines[:] {
-            sampled_at:f64=0
-            if m.state.history_count>0 {sampled_at=m.state.cpu_history[(m.state.history_next+HISTORY_CAPACITY-1)%HISTORY_CAPACITY].timestamp}
-            previous:=live_publications[m]
-            if previous.exists&&previous.sampled_at==sampled_at&&previous.status==m.status&&previous.message_len==m.message_len&&previous.message==m.message {continue}
-            persistence_publisher_submit(live_publisher,m)
-            live_publications[m]=Persistence_Publication{sampled_at=sampled_at,status=m.status,message=m.message,message_len=m.message_len,exists=true}
+        // Live files exist only for display; nobody reads them without a viewer.
+        if viewer_active {
+            for m in a.machines[:] {
+                sampled_at:f64=0
+                if m.state.history_count>0 {sampled_at=m.state.cpu_history[(m.state.history_next+HISTORY_CAPACITY-1)%HISTORY_CAPACITY].timestamp}
+                previous:=live_publications[m]
+                if previous.exists&&previous.sampled_at==sampled_at&&previous.status==m.status&&previous.message_len==m.message_len&&previous.message==m.message {continue}
+                persistence_publisher_submit(live_publisher,m)
+                live_publications[m]=Persistence_Publication{sampled_at=sampled_at,published_at=now,status=m.status,message=m.message,message_len=m.message_len,exists=true}
+            }
         }
-        // Sampling keeps every observation; serialize at most once per second
-        // rather than rewriting five minutes of history for every 100 ms poll.
+        // Sampling keeps every observation in memory. Rewriting five minutes of
+        // history is reserved for new identities, viewer requests, the periodic
+        // refresh, the durable checkpoint and shutdown.
         if now-last_publication>=1 {
+            durable:=now-last_durable>=PERSISTENCE_DURABLE_PUBLISH_SECONDS
             for m in a.machines[:] {
                 sampled_at:f64=0
                 if m.state.history_count>0 {sampled_at=m.state.cpu_history[(m.state.history_next+HISTORY_CAPACITY-1)%HISTORY_CAPACITY].timestamp}
                 previous:=publications[m]
-                if previous.exists&&previous.sampled_at==sampled_at&&previous.status==m.status&&previous.message_len==m.message_len&&previous.message==m.message {continue}
-                persistence_publisher_submit(publisher,m)
-                publications[m]=Persistence_Publication{sampled_at=sampled_at,status=m.status,message=m.message,message_len=m.message_len,exists=true}
+                changed:=!previous.exists||previous.sampled_at!=sampled_at||previous.status!=m.status||previous.message_len!=m.message_len||previous.message!=m.message
+                if !durable&&(!changed||previous.exists&&now-previous.published_at<PERSISTENCE_HISTORY_PUBLISH_SECONDS) {continue}
+                persistence_publisher_submit(publisher,m,durable)
+                publications[m]=Persistence_Publication{sampled_at=sampled_at,published_at=now,status=m.status,message=m.message,message_len=m.message_len,exists=true}
             }
+            if durable {last_durable=now}
             last_publication=now
         }
         mem.free_all(context.temp_allocator)
-        now=time.duration_seconds(time.tick_since(started))
-        // Hardware collection runs independently; drain its queue and check
-        // shared settings without spinning while a hardware query is running.
-        time.sleep(time.Duration(min(0.1,a.interval)*1e9))
+        // Hardware and SSH workers wake this loop for each sample. The timeout
+        // bounds viewer, configuration and retry checks while nothing arrives.
+        _=sync.sema_wait_with_timeout(&persistence_wake,500*time.Millisecond)
     }
     // Include the last sub-second batch when the service stops normally.
     local_sampler_stop(local.local_sampler)
     machines_sample(a,time.duration_seconds(time.tick_since(started)))
     for m in a.machines[:] {
-        persistence_publisher_submit(publisher,m)
+        persistence_publisher_submit(publisher,m,durable=true)
         persistence_publisher_submit(live_publisher,m)
     }
 }

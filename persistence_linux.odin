@@ -217,3 +217,15 @@ platform_private_path :: proc(path:string,directory:bool)->bool {
 }
 
 persistence_platform_cache_open :: proc(path:string)->(^os.File,os.Error) {return os.open(path)}
+// Live files, retry requests and viewer heartbeats change every few seconds.
+// Keep them in the user's private runtime tmpfs instead of on a disk. Both the
+// systemd user service and desktop sessions see the same XDG_RUNTIME_DIR; a
+// missing variable falls back to logind's standard path for this user.
+persistence_platform_runtime_base :: proc()->string {
+    base:=os.get_env("XDG_RUNTIME_DIR",context.temp_allocator)
+    if base==""||base[0]!='/' {base=fmt.tprintf("/run/user/%d",posix.getuid())}
+    info:posix.stat_t
+    if posix.stat(strings.clone_to_cstring(base,context.temp_allocator),&info)!=.OK||!posix.S_ISDIR(info.st_mode)||
+        info.st_uid!=posix.getuid()||info.st_mode&(posix.S_IRWXG|posix.S_IRWXO)!={} {return ""}
+    return base
+}
